@@ -696,6 +696,12 @@ class ExtractWarpAllocations : public IRMutator {
             << "Predicated stores to warp-level allocations unimplemented\n";
         // Replace with warp allocation access intrinsic
         // foo[x] -> warp_load(foo, x / warp_size, x % warp_size);
+
+        // TODO: This mapping assumes that the thread_id_x dimension
+        // is most naturally the innermost storage dimension, which is
+        // not always the case. In particular, it makes using
+        // vectorization as well very difficult. Maybe this pass could
+        // run after vectorization?
         expr = make_warp_access_intrin(Call::warp_load, op->type, op->name, op->index);
     }
 

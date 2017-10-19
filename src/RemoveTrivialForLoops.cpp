@@ -3,6 +3,7 @@
 #include "IROperator.h"
 #include "CodeGen_GPU_Dev.h"
 #include "Simplify.h"
+#include "Substitute.h"
 
 namespace Halide {
 namespace Internal {
@@ -11,15 +12,16 @@ class RemoveTrivialForLoops : public IRMutator {
     using IRMutator::visit;
 
     void visit(const For *for_loop) {
-        if (for_loop->device_api != DeviceAPI::None) {
-            // Don't assume any device API loops are trivial.
-            IRMutator::visit(for_loop);
-            return;
-        }
-
         Stmt body = mutate(for_loop->body);
 
-        if (is_one(for_loop->extent)) {
+        if (is_one(for_loop->extent) &&
+            for_loop->device_api != DeviceAPI::None) {
+            // Don't assume any device API loops are trivial, but we
+            // can substitute in the min value if the loop is size 1.
+            body = substitute(for_loop->name, for_loop->min, body);
+            stmt = For::make(for_loop->name, for_loop->min, for_loop->extent,
+                             for_loop->for_type, for_loop->device_api, body);
+        } else if (is_one(for_loop->extent)) {
             if ((for_loop->for_type == ForType::Parallel) ||
                 (for_loop->for_type == ForType::GPUBlock) ||
                 (for_loop->for_type == ForType::GPUThread)) {
@@ -41,7 +43,8 @@ class RemoveTrivialForLoops : public IRMutator {
         } else if (body.same_as(for_loop->body)) {
             stmt = for_loop;
         } else {
-            stmt = For::make(for_loop->name, for_loop->min, for_loop->extent, for_loop->for_type, for_loop->device_api, body);
+            stmt = For::make(for_loop->name, for_loop->min, for_loop->extent,
+                             for_loop->for_type, for_loop->device_api, body);
         }
     }
 };

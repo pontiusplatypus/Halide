@@ -583,13 +583,158 @@ public:
     ExtractSharedAllocations(DeviceAPI d) : in_threads(false), barrier_stage(0), device_api(d) {}
 };
 
+// Pull out any allocate node outside of the innermost thread
+// block. Should only be run after shared allocations have already
+// been extracted.
+class ExtractWarpAllocations : public IRMutator {
+    using IRMutator::visit;
+
+    struct WarpAllocation {
+        string name;
+        Type type;
+        Expr size;
+    };
+
+    bool in_thread_loop = false;
+
+    void visit(const For *op) {
+        if (ends_with(op->name, "." + thread_names[0])) {
+            internal_assert(!in_thread_loop);
+            in_thread_loop = true;
+            IRMutator::visit(op);
+            in_thread_loop = false;
+        } else {
+            // Set aside the allocations we've found so far.
+            vector<WarpAllocation> old;
+            old.swap(allocations);
+
+            // Find allocations inside the loop body
+            Stmt body = mutate(op->body);
+
+            // Expand any new warp allocations found in the body using the loop bounds.
+            Scope<Interval> scope;
+            scope.push(op->name, Interval(Variable::make(Int(32), op->name + ".loop_min"),
+                                          Variable::make(Int(32), op->name + ".loop_max")));
+
+            // Expand the inner allocations using the loop bounds.
+            for (WarpAllocation &s : allocations) {
+                if (expr_uses_var(s.size, op->name)) {
+                    s.size = bounds_of_expr_in_scope(s.size, scope).max;
+                }
+            }
+
+            // Add back on the allocations we set aside.
+            if (!allocations.empty()) {
+                allocations.insert(allocations.end(), old.begin(), old.end());
+            } else {
+                allocations.swap(old);
+            }
+
+            stmt = For::make(op->name, mutate(op->min), mutate(op->extent), op->for_type, op->device_api, body);
+        }
+    }
+
+    void visit(const Allocate *op) {
+        if (in_thread_loop) {
+            IRMutator::visit(op);
+            return;
+        }
+
+        warp_allocations.push(op->name, 0);
+        WarpAllocation alloc;
+        alloc.name = op->name;
+        alloc.type = op->type;
+        alloc.size = 1;
+        for (size_t i = 0; i < op->extents.size(); i++) {
+            alloc.size *= op->extents[i];
+        }
+        alloc.size = (alloc.size + warp_size - 1)/warp_size;
+        alloc.size = simplify(alloc.size);
+
+        allocations.push_back(alloc);
+        stmt = mutate(op->body);
+        warp_allocations.pop(op->name);
+    }
+
+    void visit(const LetStmt *op) {
+        Stmt body = mutate(op->body);
+
+        for (WarpAllocation &s : allocations) {
+            if (expr_uses_var(s.size, op->name)) {
+                s.size = simplify(Let::make(op->name, op->value, s.size));
+            }
+        }
+
+        if (op->body.same_as(body)) {
+            stmt = op;
+        } else {
+            stmt = LetStmt::make(op->name, op->value, body);
+        }
+    }
+
+    Expr make_warp_access_intrin(string intrin, Type type, string alloc, Expr idx, Expr value = Expr()) {
+        string idx_name = unique_name('t');
+        Expr idx_var = Variable::make(Int(32), idx_name);
+        Expr array_index = idx_var / warp_size;
+        Expr warp_lane = idx_var % warp_size;
+        Expr alloc_var = Variable::make(Handle(), alloc);
+        vector<Expr> args = {alloc_var, array_index, warp_lane};
+        if (value.defined()) {
+            args.push_back(value);
+        }
+        Expr call = Call::make(type, intrin, args, Call::Intrinsic);
+        call = Let::make(idx_name, idx, call);
+        return mutate(call);
+    }
+
+    void visit(const Load *op) {
+        if (!warp_allocations.contains(op->name)) {
+            IRMutator::visit(op);
+            return;
+        }
+        internal_assert(is_one(op->predicate))
+            << "Predicated stores to warp-level allocations unimplemented\n";
+        // Replace with warp allocation access intrinsic
+        // foo[x] -> warp_load(foo, x / warp_size, x % warp_size);
+        expr = make_warp_access_intrin(Call::warp_load, op->type, op->name, op->index);
+    }
+
+    void visit(const Store *op) {
+        if (!warp_allocations.contains(op->name)) {
+            IRMutator::visit(op);
+            return;
+        }
+        internal_assert(is_one(op->predicate))
+            << "Predicated stores to warp-level allocations unimplemented\n";
+        // Replace with warp allocation access intrinsic
+        // foo[x] = bar -> warp_store(foo, x / warp_size, x % warp_size, bar);
+        stmt = Evaluate::make(make_warp_access_intrin(Call::warp_store, Int(32), op->name, op->index, op->value));
+    }
+
+    vector<WarpAllocation> allocations;
+
+    Scope<int> warp_allocations;;
+
+    Expr warp_size;
+
+public:
+    Stmt rewrap(Stmt body) {
+        for (WarpAllocation &alloc : allocations) {
+            body = Allocate::make(alloc.name, alloc.type, {alloc.size}, const_true(), body);
+        }
+        return body;
+    }
+
+    ExtractWarpAllocations(Expr w) : warp_size(w) {}
+};
+
 class FuseGPUThreadLoopsSingleKernel : public IRMutator {
     using IRMutator::visit;
     const ExtractBlockSize &block_size;
     ExtractSharedAllocations &shared_mem;
 
     void visit(const For *op) {
-        if (ends_with(op->name, ".__block_id_x")) {
+        if (ends_with(op->name, "." + block_names[0])) {
             Stmt body = op->body;
 
             // This is the innermost loop over blocks.
@@ -599,6 +744,14 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
             body = n.mutate(body);
 
             debug(3) << "Normalized dimensionality:\n" << body << "\n\n";
+
+            if (block_size.dimensions()) {
+                ExtractWarpAllocations w(block_size.extent(0));
+                body = w.mutate(body);
+                body = w.rewrap(body);
+            }
+
+            debug(3) << "Extracted warp-level allocations:\n" << body << "\n\n";
 
             InjectThreadBarriers i;
             body = i.mutate(body);
@@ -610,14 +763,13 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
 
             debug(3) << "Replaced for with if:\n" << body << "\n\n";
 
-            // Rewrap the whole thing in the loop over threads
-            for (int i = 0; i < block_size.dimensions(); i++) {
-                body = For::make("." + thread_names[i], 0, block_size.extent(i), ForType::GPUThread, op->device_api, body);
-            }
+            // There is always a loop over thread_id_x
+            Expr block_size_x = block_size.dimensions() ? block_size.extent(0) : 1;
+            body = For::make("." + thread_names[0], 0, block_size_x, ForType::GPUThread, op->device_api, body);
 
-            // There at least needs to be a loop over __thread_id_x as a marker for codegen
-            if (block_size.dimensions() == 0) {
-                body = For::make(".__thread_id_x", 0, 1, ForType::GPUThread, op->device_api, body);
+            // Rewrap the whole thing in other loops over threads
+            for (int i = 1; i < block_size.dimensions(); i++) {
+                body = For::make("." + thread_names[i], 0, block_size.extent(i), ForType::GPUThread, op->device_api, body);
             }
 
             debug(3) << "Rewrapped in for loops:\n" << body << "\n\n";

@@ -43,6 +43,13 @@ class RemoveDeadAllocations : public IRMutator {
         IRMutator::visit(op);
     }
 
+    void visit(const Variable *op) {
+        if (allocs.contains(op->name)) {
+            allocs.pop(op->name);
+        }
+        expr = op;
+    }
+
     void visit(const Allocate *op) {
         allocs.push(op->name, 1);
         Stmt body = mutate(op->body);

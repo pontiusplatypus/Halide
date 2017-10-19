@@ -4071,6 +4071,14 @@ private:
                    equal(sel_f->true_value, true_value)) {
             // select(a, d, select(b, d, c)) -> select(a || b, d, c)
             expr = mutate(Select::make(condition || sel_f->condition, true_value, sel_f->false_value));
+        } else if (sel_t &&
+                   equal(sel_t->condition, condition)) {
+            // select(a, select(a, b, c), d) -> select(a, b, d)
+            expr = mutate(Select::make(condition, sel_t->true_value, false_value));
+        } else if (sel_f &&
+                   equal(sel_f->condition, condition)) {
+            // select(a, b, select(a, c, d)) -> select(a, b, d)
+            expr = mutate(Select::make(condition, true_value, sel_f->false_value));
         } else if (add_t &&
                    add_f &&
                    equal(add_t->a, add_f->a)) {
@@ -6116,6 +6124,9 @@ void check_boolean() {
 
     check(select(x > 5, 2, 3) + select(x > 5, 6, 2), select(5 < x, 8, 5));
     check(select(x > 5, 8, 3) - select(x > 5, 6, 2), select(5 < x, 2, 1));
+
+    check(select(x < 5, select(x < 5, 0, 1), 2), select(x < 5, 0, 2));
+    check(select(x < 5, 0, select(x < 5, 1, 2)), select(x < 5, 0, 2));
 
     check((1 - xf)*6 < 3, 0.5f < xf);
 

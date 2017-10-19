@@ -14,10 +14,10 @@ int main(int argc, char **argv) {
 
     {
         Buffer<float> A(size, size), B(size, size), C(size, size);
-        double t = benchmark(10, 10, [&]() {
-            mat_mul(A, B, C);
-            C.device_sync();
-        });
+        double t = Halide::Tools::benchmark(10, 10, [&]() {
+                mat_mul(A, B, C);
+                C.device_sync();
+            });
         printf("Halide time: %f\n", t);
     }
 
@@ -29,11 +29,11 @@ int main(int argc, char **argv) {
         cublasHandle_t handle;
         cublasCreate(&handle);
         float alpha = 1.0f, beta = 1.0f;
-        double t = benchmark(10, 10, [&]() {
-            cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+        double t = Halide::Tools::benchmark(10, 10, [&]() {
+                cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                         size, size, size, &alpha, A, size, B, size, &beta, C, size);
-            cudaDeviceSynchronize();
-        });
+                cudaDeviceSynchronize();
+            });
         cudaFree(A);
         cudaFree(B);
         cudaFree(C);

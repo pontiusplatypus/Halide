@@ -31,30 +31,35 @@ public:
         out(x, y) = prod(x, y);
         out.bound(x, 0, size)
             .bound(y, 0, size)
-            .tile(x, y, xi, yi, 8*32, 8)
+            .tile(x, y, xi, yi, 6*32, 8)
+            .vectorize(xi, 2)
             .split(xi, xio, xii, 32)
             .reorder(xio, yi, xii, x, y)
             .unroll(xio)
             .unroll(yi)
             .gpu_blocks(x, y).split(xii, warp, xii, 32).gpu_threads(xii, warp);
         prod.compute_at(out, warp)
-            .split(x, xo, xi, 32).gpu_threads(xi)
+            .split(x, xo, xi, 64, TailStrategy::RoundUp)
+            .vectorize(xi, 2)
+            .gpu_threads(xi)
             .unroll(xo)
             .unroll(y)
             .update()
-            .split(x, xo, xi, 32).gpu_threads(xi)
+            .split(x, xo, xi, 64, TailStrategy::RoundUp)
+            .vectorize(xi, 2)
+            .gpu_threads(xi)
             .split(r.x, rxo, rxi, 32)
             .reorder(xi, y, xo, rxi, rxo)
             .unroll(xo)
             .unroll(y);
 
         Var Bx = B.in().args()[0], By = B.in().args()[1];
+        Var Ax = A.in().args()[0], Ay = A.in().args()[1];
         B.in()
             .compute_at(prod, rxo)
             .split(Bx, xo, xi, 32)
             .gpu_threads(xi)
             .unroll(xo).unroll(By);
-        B.in().in().compute_at(prod, xi).unroll(Bx).unroll(By);
 
         set_alignment_and_bounds(A, size);
         set_alignment_and_bounds(B, size);

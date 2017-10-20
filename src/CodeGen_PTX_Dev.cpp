@@ -78,6 +78,12 @@ class LowerWarpShuffles : public IRMutator {
             Expr idx = call->args[1];
             Expr lane = call->args[2];
             Expr value = call->args[3];
+            if (const Broadcast *b = buf.as<Broadcast>()) {
+                buf = b->value;
+            }
+            if (const Broadcast *b = lane.as<Broadcast>()) {
+                lane = b->value;
+            }
             const Variable *buf_var = buf.as<Variable>();
             internal_assert(buf_var);
             user_assert(warp_size.defined())
@@ -85,8 +91,8 @@ class LowerWarpShuffles : public IRMutator {
                 << "; The gpu block width is not a power of 2 less than or equal to 32\n";
             user_assert(equal(lane, this_lane))
                 << "Bad index to store to for warp-level allocation: " << lane << "\n";
-            Stmt equiv_store = Store::make(buf_var->name, value, idx, Parameter(), const_true());
-            stmt = mutate(equiv_store);
+            Stmt equiv_store = Store::make(buf_var->name, value, idx, Parameter(), const_true(value.type().lanes()));
+            stmt = mutate(simplify(equiv_store));
         } else {
             IRMutator::visit(op);
         }
@@ -99,6 +105,9 @@ class LowerWarpShuffles : public IRMutator {
             Expr buf = op->args[0];
             Expr idx = op->args[1];
             Expr lane = op->args[2];
+            if (const Broadcast *b = buf.as<Broadcast>()) {
+                buf = b->value;
+            }
             const Variable *buf_var = buf.as<Variable>();
             internal_assert(buf_var);
             user_assert(warp_size.defined())
@@ -112,7 +121,7 @@ class LowerWarpShuffles : public IRMutator {
             // We handle other cases by converting it to a select tree
             // that muxes between all values in the allocation.
             // TODO: There's a better strategy for (idx, lane) pairs of the form (a / b, a % b).
-                                                                   internal_assert(allocations.contains(buf_var->name));
+            internal_assert(allocations.contains(buf_var->name));
             int elems = allocations.get(buf_var->name);
             if (expr_uses_vars(idx, varies_across_warp)) {
                 // Rewrite to a select tree of constant loads
@@ -124,14 +133,18 @@ class LowerWarpShuffles : public IRMutator {
                     Expr cond = simplify(idx >= i);
                     equiv = Select::make(cond, Call::make(op->type, op->name, args, Call::Intrinsic), equiv);
                 }
-                expr = mutate(equiv);
+                expr = mutate(simplify(equiv));
                 return;
             }
 
             // Load the value to be shuffled
-            Expr base_val = Load::make(op->type, buf_var->name, idx, Buffer<>(), Parameter(), const_true());
+            Expr base_val = Load::make(op->type, buf_var->name, idx, Buffer<>(), Parameter(), const_true(idx.type().lanes()));
 
-            if (equal(lane, this_lane)) {
+            Expr scalar_lane = lane;
+            if (const Broadcast *b = scalar_lane.as<Broadcast>()) {
+                scalar_lane = b->value;
+            }
+            if (equal(scalar_lane, this_lane)) {
                 // This is a regular load. No shuffling required.
                 expr = mutate(base_val);
                 return;
@@ -362,7 +375,6 @@ void CodeGen_PTX_Dev::visit(const For *loop) {
         CodeGen_LLVM::visit(loop);
     }
 }
-
 
 void CodeGen_PTX_Dev::visit(const Allocate *alloc) {
     user_assert(!alloc->new_expr.defined()) << "Allocate node inside PTX kernel has custom new expression.\n" <<

@@ -601,7 +601,11 @@ class ExtractWarpAllocations : public IRMutator {
         if (ends_with(op->name, "." + thread_names[0])) {
             internal_assert(!in_thread_loop);
             in_thread_loop = true;
+            thread_id_name = op->name;
+            thread_id = Variable::make(Int(32), op->name);
             IRMutator::visit(op);
+            thread_id = Expr();
+            thread_id_name.clear();
             in_thread_loop = false;
         } else {
             // Set aside the allocations we've found so far.
@@ -656,8 +660,17 @@ class ExtractWarpAllocations : public IRMutator {
         warp_allocations.pop(op->name);
     }
 
-    void visit(const LetStmt *op) {
-        Stmt body = mutate(op->body);
+    template<typename ExprOrStmt, typename LetOrLetStmt>
+    ExprOrStmt visit_let(const LetOrLetStmt *op) {
+        ExprOrStmt body = op->body;
+
+        if (thread_id.defined() &&
+            expr_uses_var(op->value, thread_id_name)) {
+            // We need the thread id variable substituted into the innermost expressions.
+            return mutate(substitute(op->name, op->value, body));
+        }
+
+        body = mutate(op->body);
 
         for (WarpAllocation &s : allocations) {
             if (expr_uses_var(s.size, op->name)) {
@@ -666,17 +679,42 @@ class ExtractWarpAllocations : public IRMutator {
         }
 
         if (op->body.same_as(body)) {
-            stmt = op;
+            return op;
         } else {
-            stmt = LetStmt::make(op->name, op->value, body);
+            return LetOrLetStmt::make(op->name, op->value, body);
+        }
+    }
+
+    void visit(const Let *op) {
+        expr = visit_let<Expr>(op);
+    }
+
+    void visit(const LetStmt *op) {
+        stmt = visit_let<Stmt>(op);
+    }
+
+    Expr get_natural_warp_stride(string s, Expr idx) {
+        auto it = stride.find(s);
+        if (it != stride.end()) {
+            return it->second;
+        } else {
+            string thread_id_name = thread_id.as<Variable>()->name;
+            Expr delta = simplify(substitute(thread_id, thread_id + 1, idx) - idx);
+            if (!expr_uses_var(idx, thread_id_name) || expr_uses_var(delta, thread_id_name)) {
+                // TODO: in the absence of tracking which let vars depend on the thread id, this is not rigorous enough
+                delta = 1;
+            }
+            stride[s] = delta;
+            return delta;
         }
     }
 
     Expr make_warp_access_intrin(string intrin, Type type, string alloc, Expr idx, Expr value = Expr()) {
         string idx_name = unique_name('t');
         Expr idx_var = Variable::make(Int(32), idx_name);
-        Expr array_index = idx_var / warp_size;
-        Expr warp_lane = idx_var % warp_size;
+        Expr stride = get_natural_warp_stride(alloc, idx);
+        Expr array_index = (idx_var / (warp_size * stride)) * stride + (idx_var % stride);
+        Expr warp_lane = (idx_var / stride) % warp_size;
         Expr alloc_var = Variable::make(Handle(), alloc);
         vector<Expr> args = {alloc_var, array_index, warp_lane};
         if (value.defined()) {
@@ -684,6 +722,7 @@ class ExtractWarpAllocations : public IRMutator {
         }
         Expr call = Call::make(type, intrin, args, Call::Intrinsic);
         call = Let::make(idx_name, idx, call);
+        debug(0) << "Made warp access intrin: " << call << "\n";
         return mutate(call);
     }
 
@@ -712,6 +751,7 @@ class ExtractWarpAllocations : public IRMutator {
         }
         internal_assert(is_one(op->predicate))
             << "Predicated stores to warp-level allocations unimplemented\n";
+
         // Replace with warp allocation access intrinsic
         // foo[x] = bar -> warp_store(foo, x / warp_size, x % warp_size, bar);
         stmt = Evaluate::make(make_warp_access_intrin(Call::warp_store, Int(32), op->name, op->index, op->value));
@@ -719,9 +759,19 @@ class ExtractWarpAllocations : public IRMutator {
 
     vector<WarpAllocation> allocations;
 
-    Scope<int> warp_allocations;;
+    // This tracks the stride in the allocation of the dimension that
+    // corresponds to different lanes in the warp. We can assign
+    // different threads responsibility for different storage elements
+    // any way we want, in theory. In practice it's best if we use a
+    // stride that makes it so that stores don't cross warp lanes.
+    //
+    // TODO: track vars that depend on the thread id too
+    map<string, Expr> stride;
 
-    Expr warp_size;
+    Scope<int> warp_allocations;
+
+    Expr warp_size, thread_id;
+    string thread_id_name;
 
 public:
     Stmt rewrap(Stmt body) {
@@ -731,7 +781,8 @@ public:
         return body;
     }
 
-    ExtractWarpAllocations(Expr w) : warp_size(w) {}
+    ExtractWarpAllocations(Expr w) : warp_size(w) {
+    }
 };
 
 class FuseGPUThreadLoopsSingleKernel : public IRMutator {

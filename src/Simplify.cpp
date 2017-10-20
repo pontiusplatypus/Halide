@@ -1746,7 +1746,7 @@ private:
             return;
         }
 
-        int64_t ia = 0, ib = 0, ic = 0;
+        int64_t ia = 0, ib = 0, ic = 0, id = 0;
         uint64_t ua = 0, ub = 0;
         double fa = 0.0f, fb = 0.0f;
 
@@ -1864,9 +1864,11 @@ private:
                    broadcast_b &&
                    const_int(broadcast_b->value, &ib) &&
                    ib != 0 &&
-                   mod_rem.modulus % ib == 0 &&
-                   div_imp((int64_t)mod_rem.remainder, ib) == div_imp(mod_rem.remainder + (ramp_a->lanes-1)*ia, ib)) {
-            // ramp(k*z + x, y, w) / z = broadcast(k, w) if x/z == (x + (w-1)*y)/z
+                   (ic = gcd(mod_rem.modulus, ib)) > 1 &&
+                   div_imp((int64_t)mod_rem.remainder, ic) == div_imp(mod_rem.remainder + (ramp_a->lanes-1)*ia, ic)) {
+            // ramp(k*(a*c) + x, y, w) / (b*c) = broadcast(k/b, w) if x/c == (x + (w-1)*y)/c
+            // The ramp lanes can't actually change the result, so we
+            // can just divide the base and broadcast it.
             expr = mutate(Broadcast::make(ramp_a->base / broadcast_b->value, ramp_a->lanes));
         } else if (no_overflow(op->type) &&
                    div_a &&
@@ -2041,6 +2043,20 @@ private:
             // (y + 8) / 2 -> y/2 + 4
             Expr ratio = make_const(op->type, div_imp(ia, ib));
             expr = mutate((add_a->a / b) + ratio);
+        } else if (no_overflow(op->type) &&
+                   add_a &&
+                   const_int(add_a->b, &ib) &&
+                   mul_a_a &&
+                   const_int(mul_a_a->b, &ia) &&
+                   const_int(b, &ic) &&
+                   ic > 0 &&
+                   (id = gcd(ia, ic)) != 1) {
+            // In expressions of the form (x*a + b)/c, we can divide all the constants by gcd(a, c)
+            // E.g. (y*12 + 5)/9 = (y*4 + 2)/3
+            ia = div_imp(ia, id);
+            ib = div_imp(ib, id);
+            ic = div_imp(ic, id);
+            expr = mutate((mul_a_a->a * make_const(op->type, ia) + make_const(op->type, ib)) / make_const(op->type, ic));
         } else if (no_overflow(op->type) &&
                    add_a &&
                    equal(add_a->a, b)) {
@@ -5580,6 +5596,10 @@ void check_algebra() {
     check((x + (y*4 - z)) / 2, y*2 + (x - z)/2);
     check((x - (y*4 + z)) / 2, (x - z)/2 - y*2);
     check((x - (y*4 - z)) / 2, (x + z)/2 - y*2);
+
+    // Pull out the gcd of the numerator and divisor
+    check((x * 12 + 5) / 9, (x * 4 + 1) / 3);
+    check((x * 12 + 19) / 9, (x * 4) / 3 + 2);
 
     // Cancellations in non-const integer divisions
     check((x*y)/x, y);

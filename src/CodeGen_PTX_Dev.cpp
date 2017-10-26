@@ -8,6 +8,7 @@
 #include "IRMutator.h"
 #include "Debug.h"
 #include "Simplify.h"
+#include "Solve.h"
 #include "Target.h"
 #include "LLVM_Headers.h"
 #include "LLVM_Runtime_Linker.h"
@@ -24,192 +25,6 @@ namespace Internal {
 
 using std::vector;
 using std::string;
-
-class LowerWarpShuffles : public IRMutator {
-    using IRMutator::visit;
-
-    Expr warp_size, this_lane;
-    Scope<int> allocations, varies_across_warp;
-
-    void visit(const For *op) {
-        int warp_size_bits;
-        if (ends_with(op->name, ".__thread_id_x") &&
-            is_const_power_of_two_integer(op->extent, &warp_size_bits) &&
-            warp_size_bits <= 5) {
-            warp_size = op->extent;
-            varies_across_warp.push(op->name, 0);
-            Stmt body = mutate(op->body);
-            varies_across_warp.pop(op->name);
-            warp_size = Expr();
-            stmt = For::make(op->name, op->min, op->extent,
-                             op->for_type, op->device_api, body);
-        } else {
-            IRMutator::visit(op);
-        }
-    }
-
-    void visit(const Let *op) {
-        if (warp_size.defined() &&
-            expr_uses_vars(op->value, varies_across_warp)) {
-            varies_across_warp.push(op->name, 0);
-            IRMutator::visit(op);
-            varies_across_warp.pop(op->name);
-        } else {
-            IRMutator::visit(op);
-        }
-    }
-
-    void visit(const LetStmt *op) {
-        if (warp_size.defined() &&
-            expr_uses_vars(op->value, varies_across_warp)) {
-            varies_across_warp.push(op->name, 0);
-            IRMutator::visit(op);
-            varies_across_warp.pop(op->name);
-        } else {
-            IRMutator::visit(op);
-        }
-    }
-
-    void visit(const Evaluate *op) {
-        const Call *call = op->value.as<Call>();
-        if (call && call->is_intrinsic(Call::warp_store)) {
-            internal_assert(call->args.size() == 4);
-            Expr buf = call->args[0];
-            Expr idx = call->args[1];
-            Expr lane = call->args[2];
-            Expr value = call->args[3];
-            if (const Broadcast *b = buf.as<Broadcast>()) {
-                buf = b->value;
-            }
-            if (const Broadcast *b = lane.as<Broadcast>()) {
-                lane = b->value;
-            }
-            const Variable *buf_var = buf.as<Variable>();
-            internal_assert(buf_var);
-            user_assert(warp_size.defined())
-                << "Can't use warp-level allocation for " << buf_var->name
-                << "; The gpu block width is not a power of 2 less than or equal to 32\n";
-            user_assert(equal(lane, this_lane))
-                << "Bad index to store to for warp-level allocation: " << lane << "\n";
-            Stmt equiv_store = Store::make(buf_var->name, value, idx, Parameter(), const_true(value.type().lanes()));
-            stmt = mutate(simplify(equiv_store));
-        } else {
-            IRMutator::visit(op);
-        }
-    }
-
-    void visit(const Call *op) {
-        if (op->is_intrinsic(Call::warp_load)) {
-            Expr this_lane = Variable::make(Int(32), ".__thread_id_x");
-            internal_assert(op->args.size() == 3);
-            Expr buf = op->args[0];
-            Expr idx = op->args[1];
-            Expr lane = op->args[2];
-            if (const Broadcast *b = buf.as<Broadcast>()) {
-                buf = b->value;
-            }
-            const Variable *buf_var = buf.as<Variable>();
-            internal_assert(buf_var);
-            user_assert(warp_size.defined())
-                << "Can't use warp-level allocation for " << buf_var->name
-                << "; The gpu block width is not a power of 2 less than or equal to 32\n";
-
-            // Do the equivalent load, and then ask for another lane's
-            // value of the result. For this to work simply the load index
-            // must not depend on the thread ID.
-
-            // We handle other cases by converting it to a select tree
-            // that muxes between all values in the allocation.
-            // TODO: There's a better strategy for (idx, lane) pairs of the form (a / b, a % b).
-            internal_assert(allocations.contains(buf_var->name));
-            int elems = allocations.get(buf_var->name);
-            if (expr_uses_vars(idx, varies_across_warp)) {
-                // Rewrite to a select tree of constant loads
-                vector<Expr> args = op->args;
-                args[1] = 0;
-                Expr equiv = Call::make(op->type, op->name, args, Call::Intrinsic);
-                for (int i = 1; i < elems; i++) {
-                    args[1] = i;
-                    Expr cond = simplify(idx >= i);
-                    equiv = Select::make(cond, Call::make(op->type, op->name, args, Call::Intrinsic), equiv);
-                }
-                expr = mutate(simplify(equiv));
-                return;
-            }
-
-            // Load the value to be shuffled
-            Expr base_val = Load::make(op->type, buf_var->name, idx, Buffer<>(), Parameter(), const_true(idx.type().lanes()));
-
-            Expr scalar_lane = lane;
-            if (const Broadcast *b = scalar_lane.as<Broadcast>()) {
-                scalar_lane = b->value;
-            }
-            if (equal(scalar_lane, this_lane)) {
-                // This is a regular load. No shuffling required.
-                expr = mutate(base_val);
-                return;
-            }
-
-            string intrin_suffix;
-            if (op->type == Float(32)) {
-                intrin_suffix = ".f32";
-            } else if (op->type == Int(32) || op->type == UInt(32)) {
-                intrin_suffix = ".i32";
-            } else {
-                // TODO: bools
-                user_error << "Warp shuffles only supported for scalar (u)int32_t and float\n";
-            }
-
-            // There are only a few patterns of lane access cuda can handle.
-            Expr wild = Variable::make(Int(32), "*");
-            vector<Expr> result;
-            int bits;
-
-            if (expr_match((this_lane + wild) % wild, lane, result) &&
-                is_positive_const(result[0]) &&
-                is_const_power_of_two_integer(result[1], &bits) &&
-                bits <= 5) {
-                // Rotate. Mux a shuffle up and a shuffle down
-                Expr mask = (1 << bits) - 1;
-                Expr down = Call::make(op->type, "llvm.nvvm.shfl.down" + intrin_suffix,
-                                       {base_val, result[0], (1 << bits) - 1}, Call::Extern);
-                Expr up = Call::make(op->type, "llvm.nvvm.shfl.up" + intrin_suffix,
-                                     {base_val, (1 << bits) - result[0], 0, mask}, Call::Extern);
-                Expr cond = (this_lane >= (1 << bits) - result[0]);
-                expr = mutate(select(cond, up, down));
-            } else if (expr_match(wild % wild, lane, result) &&
-                       !expr_uses_vars(result[0], varies_across_warp) &&
-                       is_const_power_of_two_integer(result[1], &bits) &&
-                       bits <= 5) {
-                // Broadcast with modulo
-                Expr mask = (1 << bits) - 1;
-                expr = mutate(Call::make(op->type, "llvm.nvvm.shfl.idx" + intrin_suffix,
-                                         {base_val, lane, mask}, Call::Extern));
-            } else if (equal(warp_size, 32) &&
-                       !expr_uses_vars(lane, varies_across_warp)) {
-                // Broadcast
-                Expr mask = warp_size - 1;
-                expr = mutate(Call::make(op->type, "llvm.nvvm.shfl.idx" + intrin_suffix,
-                                         {base_val, lane, mask}, Call::Extern));
-            } else {
-                // TODO: butterfly
-                user_error << "Unsupported access pattern for warp shuffle: " << lane << "\n";
-            }
-        } else {
-            IRMutator::visit(op);
-        }
-    }
-
-    void visit(const Allocate *alloc) {
-        int32_t size = CodeGen_GPU_Dev::get_constant_bound_allocation_size(alloc);
-        allocations.push(alloc->name, size);
-        IRMutator::visit(alloc);
-        allocations.pop(alloc->name);
-    }
-
-public:
-    LowerWarpShuffles() : this_lane(Variable::make(Int(32), ".__thread_id_x")) {}
-};
 
 using namespace llvm;
 
@@ -238,11 +53,6 @@ void CodeGen_PTX_Dev::add_kernel(Stmt stmt,
     internal_assert(module != nullptr);
 
     debug(2) << "In CodeGen_PTX_Dev::add_kernel\n";
-
-    LowerWarpShuffles shuffles;
-    stmt = simplify(shuffles.mutate(stmt));
-
-    debug(0) << "Kernel after lowering warp shuffles:\n" << stmt << "\n\n";
 
     // Now deduce the types of the arguments to our function
     vector<llvm::Type *> arg_types(args.size());

@@ -335,15 +335,23 @@ const DeviceAPI all_device_apis[] = {DeviceAPI::None,
 
 namespace Internal {
 
-/** An enum describing a type of loop traversal. Used in schedules, and in
- * the For loop IR node. GPUBlock and GPUThread are implicitly parallel */
+/** An enum describing a type of loop traversal. Used in schedules,
+ * and in the For loop IR node. Serial is a conventional ordered for
+ * loop. Iterations occur in increasing order, and each iteration must
+ * appear to have finished before the next begins. Parallel, GPUBlock,
+ * and GPUThread are parallel and unordered: iterations may occur in
+ * any order, and multiple iterations may occur
+ * simultaneously. Vectorized and GPULane are parallel and
+ * synchronous: they act as if all iterations occur at the same time
+ * in lockstep. */
 enum class ForType {
     Serial,
     Parallel,
     Vectorized,
     Unrolled,
     GPUBlock,
-    GPUThread
+    GPUThread,
+    GPULane
 };
 
 

@@ -818,8 +818,6 @@ Call::ConstString Call::select_mask = "select_mask";
 Call::ConstString Call::extract_mask_element = "extract_mask_element";
 Call::ConstString Call::require = "require";
 Call::ConstString Call::size_of_halide_buffer_t = "size_of_halide_buffer_t";
-Call::ConstString Call::warp_load = "warp_load";
-Call::ConstString Call::warp_store = "warp_store";
 
 Call::ConstString Call::buffer_get_min = "_halide_buffer_get_min";
 Call::ConstString Call::buffer_get_extent = "_halide_buffer_get_extent";

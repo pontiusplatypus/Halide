@@ -22,9 +22,7 @@ class RemoveTrivialForLoops : public IRMutator {
             stmt = For::make(for_loop->name, for_loop->min, for_loop->extent,
                              for_loop->for_type, for_loop->device_api, body);
         } else if (is_one(for_loop->extent)) {
-            if ((for_loop->for_type == ForType::Parallel) ||
-                (for_loop->for_type == ForType::GPUBlock) ||
-                (for_loop->for_type == ForType::GPUThread)) {
+            if (for_loop->for_type == ForType::Parallel) {
                 std::cerr << "Warning: Parallel for loop over "
                           << for_loop->name << " has extent one. "
                           << "Can't do one piece of work in parallel.\n";

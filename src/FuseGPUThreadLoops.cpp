@@ -595,18 +595,18 @@ class ExtractWarpAllocations : public IRMutator {
         Expr size;
     };
 
-    bool in_thread_loop = false;
+    bool in_lane_loop = false;
 
     void visit(const For *op) {
-        if (ends_with(op->name, "." + thread_names[0])) {
-            internal_assert(!in_thread_loop);
-            in_thread_loop = true;
-            thread_id_name = op->name;
-            thread_id = Variable::make(Int(32), op->name);
+        if (op->for_type == ForType::GPULane) {
+            internal_assert(!in_lane_loop);
+            in_lane_loop = true;
+            lane_id_name = op->name;
+            lane_id = Variable::make(Int(32), op->name);
             IRMutator::visit(op);
-            thread_id = Expr();
-            thread_id_name.clear();
-            in_thread_loop = false;
+            lane_id = Expr();
+            lane_id_name.clear();
+            in_lane_loop = false;
         } else {
             // Set aside the allocations we've found so far.
             vector<WarpAllocation> old;
@@ -639,7 +639,7 @@ class ExtractWarpAllocations : public IRMutator {
     }
 
     void visit(const Allocate *op) {
-        if (in_thread_loop) {
+        if (in_lane_loop) {
             IRMutator::visit(op);
             return;
         }
@@ -652,7 +652,6 @@ class ExtractWarpAllocations : public IRMutator {
         for (size_t i = 0; i < op->extents.size(); i++) {
             alloc.size *= op->extents[i];
         }
-        alloc.size = (alloc.size + warp_size - 1)/warp_size;
         alloc.size = simplify(alloc.size);
 
         allocations.push_back(alloc);
@@ -664,9 +663,11 @@ class ExtractWarpAllocations : public IRMutator {
     ExprOrStmt visit_let(const LetOrLetStmt *op) {
         ExprOrStmt body = op->body;
 
-        if (thread_id.defined() &&
-            expr_uses_var(op->value, thread_id_name)) {
-            // We need the thread id variable substituted into the innermost expressions.
+        if (lane_id.defined() &&
+            expr_uses_var(op->value, lane_id_name)) {
+            // We want the lane id variable substituted into the
+            // innermost expression in order to do correct analysis of
+            // lane strides on stores.
             return mutate(substitute(op->name, op->value, body));
         }
 
@@ -693,87 +694,15 @@ class ExtractWarpAllocations : public IRMutator {
         stmt = visit_let<Stmt>(op);
     }
 
-    Expr get_natural_warp_stride(string s, Expr idx) {
-        auto it = stride.find(s);
-        if (it != stride.end()) {
-            return it->second;
-        } else {
-            string thread_id_name = thread_id.as<Variable>()->name;
-            Expr delta = simplify(substitute(thread_id, thread_id + 1, idx) - idx);
-            if (!expr_uses_var(idx, thread_id_name) || expr_uses_var(delta, thread_id_name)) {
-                // TODO: in the absence of tracking which let vars depend on the thread id, this is not rigorous enough
-                delta = 1;
-            }
-            stride[s] = delta;
-            return delta;
-        }
-    }
-
-    Expr make_warp_access_intrin(string intrin, Type type, string alloc, Expr idx, Expr value = Expr()) {
-        string idx_name = unique_name('t');
-        Expr idx_var = Variable::make(Int(32), idx_name);
-        Expr stride = get_natural_warp_stride(alloc, idx);
-        Expr array_index = (idx_var / (warp_size * stride)) * stride + (idx_var % stride);
-        Expr warp_lane = (idx_var / stride) % warp_size;
-        Expr alloc_var = Variable::make(Handle(), alloc);
-        vector<Expr> args = {alloc_var, array_index, warp_lane};
-        if (value.defined()) {
-            args.push_back(value);
-        }
-        Expr call = Call::make(type, intrin, args, Call::Intrinsic);
-        call = Let::make(idx_name, idx, call);
-        debug(0) << "Made warp access intrin: " << call << "\n";
-        return mutate(call);
-    }
-
-    void visit(const Load *op) {
-        if (!warp_allocations.contains(op->name)) {
-            IRMutator::visit(op);
-            return;
-        }
-        internal_assert(is_one(op->predicate))
-            << "Predicated stores to warp-level allocations unimplemented\n";
-        // Replace with warp allocation access intrinsic
-        // foo[x] -> warp_load(foo, x / warp_size, x % warp_size);
-
-        // TODO: This mapping assumes that the thread_id_x dimension
-        // is most naturally the innermost storage dimension, which is
-        // not always the case. In particular, it makes using
-        // vectorization as well very difficult. Maybe this pass could
-        // run after vectorization?
-        expr = make_warp_access_intrin(Call::warp_load, op->type, op->name, op->index);
-    }
-
-    void visit(const Store *op) {
-        if (!warp_allocations.contains(op->name)) {
-            IRMutator::visit(op);
-            return;
-        }
-        internal_assert(is_one(op->predicate))
-            << "Predicated stores to warp-level allocations unimplemented\n";
-
-        // Replace with warp allocation access intrinsic
-        // foo[x] = bar -> warp_store(foo, x / warp_size, x % warp_size, bar);
-        stmt = Evaluate::make(make_warp_access_intrin(Call::warp_store, Int(32), op->name, op->index, op->value));
-    }
-
-    vector<WarpAllocation> allocations;
-
-    // This tracks the stride in the allocation of the dimension that
-    // corresponds to different lanes in the warp. We can assign
-    // different threads responsibility for different storage elements
-    // any way we want, in theory. In practice it's best if we use a
-    // stride that makes it so that stores don't cross warp lanes.
-    //
-    // TODO: track vars that depend on the thread id too
-    map<string, Expr> stride;
 
     Scope<int> warp_allocations;
 
-    Expr warp_size, thread_id;
-    string thread_id_name;
+    Expr warp_size, lane_id;
+    string lane_id_name;
 
 public:
+    vector<WarpAllocation> allocations;
+
     Stmt rewrap(Stmt body) {
         for (WarpAllocation &alloc : allocations) {
             body = Allocate::make(alloc.name, alloc.type, {alloc.size}, const_true(), body);
@@ -802,10 +731,14 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
 
             debug(3) << "Normalized dimensionality:\n" << body << "\n\n";
 
+            Expr block_size_x = block_size.dimensions() ? block_size.extent(0) : 1;
+            ExtractWarpAllocations warp_allocs(block_size_x);
+            ForType innermost_loop_type = ForType::GPUThread;
             if (block_size.dimensions()) {
-                ExtractWarpAllocations w(block_size.extent(0));
-                body = w.mutate(body);
-                body = w.rewrap(body);
+                body = warp_allocs.mutate(body);
+                if (!warp_allocs.allocations.empty()) {
+                    innermost_loop_type = ForType::GPULane;
+                }
             }
 
             debug(3) << "Extracted warp-level allocations:\n" << body << "\n\n";
@@ -821,8 +754,10 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
             debug(3) << "Replaced for with if:\n" << body << "\n\n";
 
             // There is always a loop over thread_id_x
-            Expr block_size_x = block_size.dimensions() ? block_size.extent(0) : 1;
-            body = For::make("." + thread_names[0], 0, block_size_x, ForType::GPUThread, op->device_api, body);
+            body = For::make("." + thread_names[0], 0, block_size_x, innermost_loop_type, op->device_api, body);
+
+            // Add back in any warp-level allocations
+            body = warp_allocs.rewrap(body);
 
             // Rewrap the whole thing in other loops over threads
             for (int i = 1; i < block_size.dimensions(); i++) {

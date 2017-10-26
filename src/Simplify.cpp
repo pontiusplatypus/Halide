@@ -1035,6 +1035,11 @@ private:
         const Add *add_a_a = min_a ? min_a->a.as<Add>() : nullptr;
         const Add *add_a_b = min_a ? min_a->b.as<Add>() : nullptr;
 
+        if (add_a) {
+            add_a_a = add_a->a.as<Add>();
+            add_a_b = add_a->b.as<Add>();
+        }
+
         if (div_a) {
             add_a_a = div_a->a.as<Add>();
             add_a_b = div_a->b.as<Add>();
@@ -1275,6 +1280,26 @@ private:
                    equal(add_a->b, add_b->a)) {
             // (b + a) - (a + c) -> b - c
             expr = mutate(add_a->a - add_b->b);
+        } else if (add_a &&
+                   add_a_a &&
+                   equal(add_a_a->a, b)) {
+            // ((a + b) + c) - a -> b + c
+            expr = mutate(add_a_a->b + add_a->b);
+        } else if (add_a &&
+                   add_a_a &&
+                   equal(add_a_a->b, b)) {
+            // ((a + b) + c) - b -> a + c
+            expr = mutate(add_a_a->a + add_a->b);
+        } else if (add_a &&
+                   add_a_b &&
+                   equal(add_a_b->a, b)) {
+            // (a + (b + c)) - b -> a + c
+            expr = mutate(add_a->a + add_a_b->b);
+        } else if (add_a &&
+                   add_a_b &&
+                   equal(add_a_b->b, b)) {
+            // (a + (b + c)) - c -> a + b
+            expr = mutate(add_a->a + add_a_b->a);
         } else if (no_overflow(op->type) &&
                    div_b && sub_div_b_a &&
                    is_simple_const(a) &&
@@ -5633,6 +5658,11 @@ void check_algebra() {
 
     check((x - y) - (z - y), x - z);
     check((y - z) - (y - x), x - z);
+
+    check(((x + y) + z) - x, y + z);
+    check(((x + y) + z) - y, x + z);
+    check((x + (y + z)) - y, x + z);
+    check((x + (y + z)) - z, x + y);
 
     check((x*8) % 4, 0);
     check((x*8 + y) % 4, y % 4);

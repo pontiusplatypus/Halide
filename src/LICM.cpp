@@ -115,7 +115,8 @@ class LICM : public IRMutator {
         bool old_in_gpu_loop = in_gpu_loop;
         in_gpu_loop =
             (op->for_type == ForType::GPUBlock ||
-             op->for_type == ForType::GPUThread);
+             op->for_type == ForType::GPUThread ||
+             op->for_type == ForType::GPULane);
 
         if (old_in_gpu_loop && in_gpu_loop) {
             // Don't lift lets to in-between gpu blocks/threads

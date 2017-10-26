@@ -344,6 +344,7 @@ SOURCE_FILES = \
   LLVM_Runtime_Linker.cpp \
   LoopCarry.cpp \
   Lower.cpp \
+  LowerWarpShuffles.cpp \
   MatlabWrapper.cpp \
   Memoization.cpp \
   Module.cpp \
@@ -485,6 +486,7 @@ HEADER_FILES = \
   LLVM_Runtime_Linker.h \
   LoopCarry.h \
   Lower.h \
+  LowerWarpShuffles.h \
   MainPage.h \
   MatlabWrapper.h \
   Memoization.h \
@@ -1708,7 +1710,6 @@ distrib: $(DISTRIB_DIR)/halide.tgz
 
 $(BIN_DIR)/HalideTraceViz: $(ROOT_DIR)/util/HalideTraceViz.cpp $(ROOT_DIR)/util/HalideTraceUtils.cpp $(INCLUDE_DIR)/HalideRuntime.h $(ROOT_DIR)/tools/halide_image_io.h
 	$(CXX) $(OPTIMIZE) -std=c++11 $(filter %.cpp,$^) -I$(INCLUDE_DIR) -I$(ROOT_DIR)/tools -L$(BIN_DIR) -o $@
-	
+
 $(BIN_DIR)/HalideTraceDump: $(ROOT_DIR)/util/HalideTraceDump.cpp $(ROOT_DIR)/util/HalideTraceUtils.cpp $(INCLUDE_DIR)/HalideRuntime.h $(ROOT_DIR)/tools/halide_image_io.h
 	$(CXX) $(OPTIMIZE) -std=c++11 $(filter %.cpp,$^) -I$(INCLUDE_DIR) -I$(ROOT_DIR)/tools -I$(ROOT_DIR)/src/runtime -L$(BIN_DIR) $(IMAGE_IO_CXX_FLAGS) $(IMAGE_IO_LIBS) -o $@
-

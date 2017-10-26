@@ -196,6 +196,9 @@ ostream &operator<<(ostream &out, const ForType &type) {
     case ForType::GPUThread:
         out << "gpu_thread";
         break;
+    case ForType::GPULane:
+        out << "gpu_lane";
+        break;
     }
     return out;
 }

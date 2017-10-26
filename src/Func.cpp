@@ -287,7 +287,8 @@ void Stage::set_dim_type(VarOrRVar var, ForType t) {
             // validate that this doesn't introduce a race condition.
             if (!dims[i].is_pure() && var.is_rvar &&
                 (t == ForType::Vectorized || t == ForType::Parallel ||
-                 t == ForType::GPUBlock || t == ForType::GPUThread)) {
+                 t == ForType::GPUBlock || t == ForType::GPUThread ||
+                 t == ForType::GPULane)) {
                 user_assert(definition.schedule().allow_race_conditions())
                     << "In schedule for " << stage_name
                     << ", marking var " << var.name()
@@ -1525,6 +1526,12 @@ Stage &Stage::gpu_threads(VarOrRVar tx, VarOrRVar ty, VarOrRVar tz, DeviceAPI de
     return *this;
 }
 
+Stage &Stage::gpu_lanes(VarOrRVar tx, DeviceAPI device_api) {
+    set_dim_device_api(tx, device_api);
+    set_dim_type(tx, ForType::GPULane);
+    return *this;
+}
+
 Stage &Stage::gpu_blocks(VarOrRVar bx, DeviceAPI device_api) {
     set_dim_device_api(bx, device_api);
     set_dim_type(bx, ForType::GPUBlock);
@@ -2090,6 +2097,12 @@ Func &Func::gpu_threads(VarOrRVar tx, VarOrRVar ty, DeviceAPI device_api) {
 Func &Func::gpu_threads(VarOrRVar tx, VarOrRVar ty, VarOrRVar tz, DeviceAPI device_api) {
     invalidate_cache();
     Stage(func.definition(), name(), args(), func.schedule()).gpu_threads(tx, ty, tz, device_api);
+    return *this;
+}
+
+Func &Func::gpu_lanes(VarOrRVar tx, DeviceAPI device_api) {
+    invalidate_cache();
+    Stage(func.definition(), name(), args(), func.schedule()).gpu_lanes(tx, device_api);
     return *this;
 }
 

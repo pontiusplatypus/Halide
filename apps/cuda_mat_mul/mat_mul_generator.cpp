@@ -26,7 +26,7 @@ public:
         RDom r(0, size);
         prod(x, y) += A(x, r) * B(r, y);
 
-        Var xi, yi, xio, xii, yii, xo, warp, x_pair;
+        Var xi, yi, xio, xii, yii, xo, x_pair;
         RVar rxo, rxi;
         out(x, y) = prod(x, y);
         out.bound(x, 0, size)
@@ -37,17 +37,17 @@ public:
             .reorder(xio, yi, xii, x, y)
             .unroll(xio)
             .unroll(yi)
-            .gpu_blocks(x, y).split(xii, warp, xii, 32).gpu_threads(xii, warp);
-        prod.compute_at(out, warp)
+            .gpu_blocks(x, y).gpu_lanes(xii);
+        prod.compute_at(out, x)
             .split(x, xo, xi, 64, TailStrategy::RoundUp)
             .vectorize(xi, 2)
-            .gpu_threads(xi)
+            .gpu_lanes(xi)
             .unroll(xo)
             .unroll(y)
             .update()
             .split(x, xo, xi, 64, TailStrategy::RoundUp)
             .vectorize(xi, 2)
-            .gpu_threads(xi)
+            .gpu_lanes(xi)
             .split(r.x, rxo, rxi, 32)
             .reorder(xi, y, xo, rxi, rxo)
             .unroll(xo)
@@ -58,7 +58,7 @@ public:
         B.in()
             .compute_at(prod, rxo)
             .split(Bx, xo, xi, 32)
-            .gpu_threads(xi)
+            .gpu_lanes(xi)
             .unroll(xo).unroll(By);
 
         set_alignment_and_bounds(A, size);

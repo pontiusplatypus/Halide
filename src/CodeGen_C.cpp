@@ -1411,8 +1411,9 @@ void CodeGen_C::compile(const Module &input) {
             f.body.accept(&type_info);
         }
     }
-    uses_gpu_for_loops = type_info.for_types_used.count(ForType::GPUBlock) ||
-                         type_info.for_types_used.count(ForType::GPUThread);
+    uses_gpu_for_loops = (type_info.for_types_used.count(ForType::GPUBlock) ||
+                          type_info.for_types_used.count(ForType::GPUThread) ||
+                          type_info.for_types_used.count(ForType::GPULane));
 
     // Forward-declare all the types we need; this needs to happen before
     // we emit function prototypes, since those may need the types.

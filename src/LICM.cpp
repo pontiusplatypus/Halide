@@ -114,6 +114,29 @@ public:
     map<Expr, string, IRDeepCompare> lifted;
 };
 
+// The pass above can lift out the value of lets entirely, leaving
+// them as just renamings of other variables. Easier to substitute
+// them in as a post-pass that make the pass above more clever.
+class SubstituteTrivialLets : public IRMutator {
+    using IRMutator::visit;
+
+    void visit(const Let *op) {
+        if (op->value.as<Variable>()) {
+            expr = mutate(substitute(op->name, op->value, op->body));
+        } else {
+            IRMutator::visit(op);
+        }
+    }
+
+    void visit(const LetStmt *op) {
+        if (op->value.as<Variable>()) {
+            stmt = mutate(substitute(op->name, op->value, op->body));
+        } else {
+            IRMutator::visit(op);
+        }
+    }
+};
+
 class LICM : public IRMutator {
     using IRVisitor::visit;
 
@@ -147,8 +170,7 @@ class LICM : public IRMutator {
         bool old_in_gpu_loop = in_gpu_loop;
         in_gpu_loop =
             (op->for_type == ForType::GPUBlock ||
-             op->for_type == ForType::GPUThread ||
-             op->for_type == ForType::GPULane);
+             op->for_type == ForType::GPUThread);
 
         if (old_in_gpu_loop && in_gpu_loop) {
             // Don't lift lets to in-between gpu blocks/threads
@@ -162,6 +184,7 @@ class LICM : public IRMutator {
             // Lift invariants
             LiftLoopInvariants lifter;
             Stmt new_stmt = lifter.mutate(op);
+            new_stmt = SubstituteTrivialLets().mutate(new_stmt);
 
             // As an optimization to reduce register pressure, take
             // the set of expressions to lift and check if any can
@@ -251,7 +274,6 @@ class LICM : public IRMutator {
         in_gpu_loop = old_in_gpu_loop;
     }
 };
-
 
 // Reassociate summations to group together the loop invariants. Useful to run before LICM.
 class GroupLoopInvariants : public IRMutator {

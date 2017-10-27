@@ -525,6 +525,14 @@ private:
     }
 
     void visit(const Variable *op) {
+        if (bounds_info.contains(op->name)) {
+            std::pair<int64_t, int64_t> bounds = bounds_info.get(op->name);
+            if (bounds.first == bounds.second) {
+                expr = make_const(op->type, bounds.first);
+                return;
+            }
+        }
+
         if (var_info.contains(op->name)) {
             VarInfo &info = var_info.ref(op->name);
 

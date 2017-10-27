@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (1) { // TODO: Doesn't work yet.
+    {
         // A shuffle with a shift amount that depends on the y coord
         Func a, b;
         Var x, y;
@@ -200,8 +200,8 @@ int main(int argc, char **argv) {
         b(x, y) = a(x + y, y);
 
         Var xi, yi;
-        b.gpu_tile(x, y, xi, yi, 32, 8, TailStrategy::RoundUp).gpu_lanes(xi);
-        a.compute_at(b, yi).split(x, x, xi, 32, TailStrategy::RoundUp).gpu_lanes(xi);
+        b.gpu_tile(x, y, xi, yi, 16, 8, TailStrategy::RoundUp).gpu_lanes(xi);
+        a.compute_at(b, yi).gpu_lanes(x);
 
         Buffer<int> out = b.realize(32, 32);
         for (int y = 0; y < out.height(); y++) {
@@ -217,24 +217,75 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (0) { // TODO: This generates horrible IR and PTX
-        // An upsample
-        Func a, b;
+    {
+        // Bilinear upsample
+        Func f, upx, upy;
         Var x, y;
 
-        a(x, y) = x + y;
-        b(x, y) = a(x/2, y/2);
+        f(x, y) = cast<float>(x + y);
+        f.compute_root();
 
-        Var xi, yi;
-        b.align_bounds(x, 2).unroll(x, 2).gpu_tile(x, y, xi, yi, 32, 2, TailStrategy::RoundUp).gpu_lanes(xi);
-        a.compute_root().in().compute_at(b, yi).gpu_lanes(x);
+        upx(x, y) = 0.25f * f((x/2) - 1 + 2*(x % 2), y) + 0.75f * f(x/2, y);
+        upy(x, y) = 0.25f * upx(x, (y/2) - 1 + 2*(y % 2)) + 0.75f * upx(x, y/2);
 
-        b.realize(64, 64);
+        // Compute 128x64 tiles of output, which require 66x34 tiles
+        // of input. All intermediate data stored in lanes and
+        // accessed using register shuffles.
+
+        Var xi, yi, xii, yii;
+        upy.tile(x, y, xi, yi, 128, 64, TailStrategy::RoundUp)
+            .tile(xi, yi, xii, yii, 4, 8).vectorize(xii)
+            .gpu_blocks(x, y).gpu_threads(yi).gpu_lanes(xi);
+
+        upx.compute_at(upy, yi).unroll(x, 4).gpu_lanes(x).unroll(y);
+
+        // Stage the input into lanes, doing two dense vector loads
+        // per lane, and use register shuffles to do the upsample in x.
+        f.in().compute_at(upy, yi).align_storage(x, 64)
+            .vectorize(x, 2, TailStrategy::RoundUp)
+            .split(x, x, xi, 32, TailStrategy::GuardWithIf)
+            .reorder(xi, y, x).gpu_lanes(xi).unroll(x).unroll(y);
+
+        upy.output_buffer().dim(0).set_min(0).dim(1).set_min(0);
+        Buffer<float> out = upy.realize(128, 128);
+
+        for (int y = 0; y < out.height(); y++) {
+            for (int x = 0; x < out.width(); x++) {
+                float actual = out(x, y);
+                float correct = (x + y - 1) / 2.0f;
+                if (correct != actual) {
+                    printf("out(%d, %d) = %f instead of %f\n",
+                           x, y, actual, correct);
+                    return -1;
+                }
+            }
+        }
     }
 
     {
-        // Half-warp shuffle with a shift amount that depends on the y coord
+        // Box-downsample by a factor of 8 using summation within each
+        // warp. Does a general any->any permutation.
+        Func f;
+        Var x, y;
+        f(x, y) = cast<float>(x + y);
+        f.compute_root();
 
+        Func s1, s2, s3, s4;
+
+        s1(x, y) = f(2*x, y) + f(2*x + 1, y);
+        s2(x, y) = s1(2*x, y) + s1(2*x + 1, y);
+        s3(x, y) = s2(2*x, y) + s2(2*x + 1, y);
+        s4(x, y) = s3(x, y);
+
+        Var xi, yi;
+        s4.gpu_tile(x, y, xi, yi, 64, 1, TailStrategy::RoundUp).vectorize(xi, 2).gpu_lanes(xi);
+        s3.in(s4).compute_at(s4, xi).unroll(x);
+        s3.compute_at(s4, yi).split(x, x, xi, 32, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        s2.compute_at(s4, yi).split(x, x, xi, 32, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        s1.compute_at(s4, yi).split(x, x, xi, 32, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        f.in().compute_at(s4, yi).split(x, x, xi, 64, TailStrategy::RoundUp).vectorize(xi, 2).gpu_lanes(xi).unroll(x);
+
+        s4.realize(64, 64);
     }
 
     // TODO add custom lowering pass that verifies no shared usage

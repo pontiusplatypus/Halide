@@ -41,7 +41,16 @@ class InjectThreadBarriers : public IRMutator {
             in_threads = true;
         }
 
-        IRMutator::visit(op);
+        if (op->for_type == ForType::Serial) {
+            Stmt body = mutate(op->body);
+            if (!body.same_as(op->body)) {
+                body = Block::make(body, barrier);
+            }
+            stmt = For::make(op->name, op->min, op->extent,
+                             op->for_type, op->device_api, body);
+        } else {
+            IRMutator::visit(op);
+        }
 
         in_threads = old_in_threads;
     }
@@ -330,7 +339,7 @@ class ExtractSharedAllocations : public IRMutator {
         user_assert(!op->new_expr.defined()) << "Allocate node inside GPU kernel has custom new expression.\n" <<
             "(Memoization is not supported inside GPU kernels at present.)\n";
 
-        if (in_threads) {
+        if (in_threads || op->name == "prod") { // TODO: Remove this hack and replace with store_in
             IRMutator::visit(op);
             return;
         }
@@ -591,6 +600,7 @@ class ExtractWarpAllocations : public IRMutator {
 
     struct WarpAllocation {
         string name;
+        string loop_var; // The nearest enclosing loop over threads. Empty if it's at block level.
         Type type;
         Expr size;
     };
@@ -598,16 +608,19 @@ class ExtractWarpAllocations : public IRMutator {
     bool in_lane_loop = false;
 
     void visit(const For *op) {
+        string old_loop_var = loop_var;
+
         if (op->for_type == ForType::GPULane) {
+            loop_var = op->name;
             internal_assert(!in_lane_loop);
             in_lane_loop = true;
-            lane_id_name = op->name;
-            lane_id = Variable::make(Int(32), op->name);
             IRMutator::visit(op);
-            lane_id = Expr();
-            lane_id_name.clear();
             in_lane_loop = false;
         } else {
+            if (op->for_type == ForType::GPUThread) {
+                loop_var = op->name;
+            }
+
             // Set aside the allocations we've found so far.
             vector<WarpAllocation> old;
             old.swap(allocations);
@@ -636,6 +649,7 @@ class ExtractWarpAllocations : public IRMutator {
 
             stmt = For::make(op->name, mutate(op->min), mutate(op->extent), op->for_type, op->device_api, body);
         }
+        loop_var = old_loop_var;
     }
 
     void visit(const Allocate *op) {
@@ -649,6 +663,7 @@ class ExtractWarpAllocations : public IRMutator {
         alloc.name = op->name;
         alloc.type = op->type;
         alloc.size = 1;
+        alloc.loop_var = loop_var;
         for (size_t i = 0; i < op->extents.size(); i++) {
             alloc.size *= op->extents[i];
         }
@@ -662,14 +677,6 @@ class ExtractWarpAllocations : public IRMutator {
     template<typename ExprOrStmt, typename LetOrLetStmt>
     ExprOrStmt visit_let(const LetOrLetStmt *op) {
         ExprOrStmt body = op->body;
-
-        if (lane_id.defined() &&
-            expr_uses_var(op->value, lane_id_name)) {
-            // We want the lane id variable substituted into the
-            // innermost expression in order to do correct analysis of
-            // lane strides on stores.
-            return mutate(substitute(op->name, op->value, body));
-        }
 
         body = mutate(op->body);
 
@@ -696,21 +703,19 @@ class ExtractWarpAllocations : public IRMutator {
 
 
     Scope<int> warp_allocations;
-
-    Expr warp_size, lane_id;
-    string lane_id_name;
+    string loop_var;
 
 public:
     vector<WarpAllocation> allocations;
 
-    Stmt rewrap(Stmt body) {
+    Stmt rewrap(Stmt body, const string &loop_var) {
         for (WarpAllocation &alloc : allocations) {
-            body = Allocate::make(alloc.name, alloc.type, {alloc.size}, const_true(), body);
+            if ((!loop_var.empty() && ends_with(alloc.loop_var, loop_var)) |
+                (loop_var.empty() && alloc.loop_var.empty())) {
+                body = Allocate::make(alloc.name, alloc.type, {alloc.size}, const_true(), body);
+            }
         }
         return body;
-    }
-
-    ExtractWarpAllocations(Expr w) : warp_size(w) {
     }
 };
 
@@ -732,7 +737,7 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
             debug(3) << "Normalized dimensionality:\n" << body << "\n\n";
 
             Expr block_size_x = block_size.dimensions() ? block_size.extent(0) : 1;
-            ExtractWarpAllocations warp_allocs(block_size_x);
+            ExtractWarpAllocations warp_allocs;
             ForType innermost_loop_type = ForType::GPUThread;
             if (block_size.dimensions()) {
                 body = warp_allocs.mutate(body);
@@ -754,15 +759,19 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
             debug(3) << "Replaced for with if:\n" << body << "\n\n";
 
             // There is always a loop over thread_id_x
-            body = For::make("." + thread_names[0], 0, block_size_x, innermost_loop_type, op->device_api, body);
-
+            string thread_id = "." + thread_names[0];
             // Add back in any warp-level allocations
-            body = warp_allocs.rewrap(body);
+            body = warp_allocs.rewrap(body, thread_id);
+            body = For::make(thread_id, 0, block_size_x, innermost_loop_type, op->device_api, body);
 
             // Rewrap the whole thing in other loops over threads
             for (int i = 1; i < block_size.dimensions(); i++) {
+                thread_id = "." + thread_names[i];
+                body = warp_allocs.rewrap(body, thread_id);
                 body = For::make("." + thread_names[i], 0, block_size.extent(i), ForType::GPUThread, op->device_api, body);
             }
+            thread_id.clear();
+            body = warp_allocs.rewrap(body, thread_id);
 
             debug(3) << "Rewrapped in for loops:\n" << body << "\n\n";
 

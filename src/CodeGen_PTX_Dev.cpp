@@ -474,6 +474,17 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
         // Note: It works to embed the contents of the .sass file in
         // the buffer instead of the ptx source, and this could help
         // with app startup times. Expose via the target?
+        /*
+        {
+            std::ifstream f(sass.pathname());
+            buffer.clear();
+            f.seekg(0, std::ios_base::end);
+            std::streampos sz = f.tellg();
+            buffer.resize(sz);
+            f.seekg(0, std::ios_base::beg);
+            f.read(buffer.data(), sz);
+        }
+        */
     }
 
     // Null-terminate the ptx source

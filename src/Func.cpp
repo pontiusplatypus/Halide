@@ -1938,6 +1938,12 @@ Func &Func::memoize() {
     return *this;
 }
 
+Func &Func::store_in(MemoryType t) {
+    invalidate_cache();
+    func.schedule().memory_type() = t;
+    return *this;
+}
+
 Stage Func::specialize(Expr c) {
     invalidate_cache();
     return Stage(func.definition(), name(), args(), func.schedule()).specialize(c);

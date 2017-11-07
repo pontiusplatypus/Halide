@@ -53,6 +53,10 @@ class BoundSmallAllocations : public IRMutator {
             total_extent *= e;
         }
         Expr bound = find_constant_bound(total_extent, Direction::Upper, scope);
+        user_assert(op->memory_type != MemoryType::Stack || bound.defined())
+            << "Allocation " << op->name << " has a dynamic size. "
+            << "Only fixed-size allocations can be stored on the stack. "
+            << "Try storing on the heap instead.";
         user_assert(!in_thread_loop || bound.defined())
             << "Allocation " << op->name << " has a dynamic size. "
             << "Only fixed-size allocations are supported on the gpu. "
@@ -63,11 +67,12 @@ class BoundSmallAllocations : public IRMutator {
         Expr malloc_overhead = 128 / op->type.bytes();
         if (bound.defined() &&
             (in_thread_loop ||
-             can_prove(bound <= malloc_overhead))) {
+             op->memory_type == MemoryType::Stack ||
+             (op->memory_type == MemoryType::Auto && can_prove(bound <= malloc_overhead)))) {
             user_assert(can_prove(bound <= Int(32).max()))
                 << "Allocation " << op->name << " has a size greater than 2^31: " << bound << "\n";
             bound = simplify(cast<int32_t>(bound));
-            stmt = Allocate::make(op->name, op->type, {bound}, op->condition,
+            stmt = Allocate::make(op->name, op->type, op->memory_type, {bound}, op->condition,
                                   mutate(op->body), op->new_expr, op->free_function);
             return;
         } else {

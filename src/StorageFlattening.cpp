@@ -191,7 +191,7 @@ private:
         stmt = LetStmt::make(op->name + ".buffer", builder.build(), stmt);
 
         // Make the allocation node
-        stmt = Allocate::make(op->name, op->types[0], allocation_extents, condition, stmt);
+        stmt = Allocate::make(op->name, op->types[0], op->memory_type, allocation_extents, condition, stmt);
 
         // Compute the strides
         for (int i = (int)op->bounds.size()-1; i > 0; i--) {
@@ -416,7 +416,7 @@ class PromoteToMemoryType : public IRMutator {
             for (Expr e : op->extents) {
                 extents.push_back(mutate(e));
             }
-            stmt = Allocate::make(op->name, t, extents,
+            stmt = Allocate::make(op->name, t, op->memory_type, extents,
                                   mutate(op->condition), mutate(op->body),
                                   mutate(op->new_expr), op->free_function);
         } else {

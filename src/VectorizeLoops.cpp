@@ -853,7 +853,7 @@ class VectorSubs : public IRMutator {
         // The variable itself could still exist inside an inner scalarized block.
         body = substitute(v, Variable::make(Int(32), var), body);
 
-        stmt = Allocate::make(op->name, op->type, new_extents, op->condition, body, new_expr, op->free_function);
+        stmt = Allocate::make(op->name, op->type, op->memory_type, new_extents, op->condition, body, new_expr, op->free_function);
     }
 
     Stmt scalarize(Stmt s) {

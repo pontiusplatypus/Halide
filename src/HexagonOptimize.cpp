@@ -1383,7 +1383,8 @@ class EliminateInterleaves : public IRMutator {
         }
 
         if (!body.same_as(op->body) || !condition.same_as(op->condition)) {
-            stmt = Allocate::make(op->name, op->type, op->extents, condition, body,
+            stmt = Allocate::make(op->name, op->type, op->memory_type,
+                                  op->extents, condition, body,
                                   op->new_expr, op->free_function);
         } else {
             stmt = op;

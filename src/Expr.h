@@ -333,6 +333,32 @@ const DeviceAPI all_device_apis[] = {DeviceAPI::None,
                                      DeviceAPI::Metal,
                                      DeviceAPI::Hexagon};
 
+/** An enum describing different address spaces to be used with Func::store_in. */
+enum class MemoryType {
+    /** Let Halide select a storage type automatically */
+    Auto,
+
+    /** Heap/global memory. Allocated using halide_malloc, or
+     * halide_device_malloc */
+    Heap,
+
+    /** Stack memory. Allocated using alloca. Requires a constant
+     * size. Corresponds to per-thread local memory on the GPU. If all
+     * accesses are at constant coordinates, may be promoted into the
+     * register file at the discretion of the register allocator. */
+    Stack,
+
+    /** Register memory. The allocation should be promoted into the
+     * register file. All stores must be at constant coordinates. May
+     * be spilled to the stack at the discretion of the register
+     * allocator. */
+    Register,
+
+    /** Allocation is stored in GPU shared memory. Can be shared
+     * across GPU threads within the same block. */
+    GPUShared,
+};
+
 namespace Internal {
 
 /** An enum describing a type of loop traversal. Used in schedules,

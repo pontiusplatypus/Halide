@@ -80,7 +80,7 @@ class DebugToFile : public IRMutator {
             body = LetStmt::make(call_result_name, call, body);
             body = Block::make(mutate(op->body), body);
 
-            stmt = Realize::make(op->name, op->types, op->bounds, op->condition, body);
+            stmt = Realize::make(op->name, op->types, op->memory_type, op->bounds, op->condition, body);
 
         } else {
             IRMutator::visit(op);
@@ -120,7 +120,7 @@ Stmt debug_to_file(Stmt s, const vector<Function> &outputs, const map<string, Fu
             Expr extent = Variable::make(Int(32), out.name() + ".extent." + dim);
             output_bounds.push_back(Range(min, extent));
         }
-        s = Realize::make(out.name(), out.output_types(), output_bounds, const_true(), s);
+        s = Realize::make(out.name(), out.output_types(), MemoryType::Auto, output_bounds, const_true(), s);
     }
     s = DebugToFile(env).mutate(s);
 

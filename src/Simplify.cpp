@@ -5261,8 +5261,8 @@ private:
             equal(op->condition, body_if->condition)) {
             // We can move the allocation into the if body case. The
             // else case must not use it.
-            stmt = Allocate::make(op->name, op->type, new_extents,
-                                  condition, body_if->then_case,
+            stmt = Allocate::make(op->name, op->type, op->memory_type,
+                                  new_extents, condition, body_if->then_case,
                                   new_expr, op->free_function);
             stmt = IfThenElse::make(body_if->condition, stmt, body_if->else_case);
         } else if (all_extents_unmodified &&
@@ -5271,8 +5271,8 @@ private:
                    new_expr.same_as(op->new_expr)) {
             stmt = op;
         } else {
-            stmt = Allocate::make(op->name, op->type, new_extents,
-                                  condition, body,
+            stmt = Allocate::make(op->name, op->type, op->memory_type,
+                                  new_extents, condition, body,
                                   new_expr, op->free_function);
         }
     }

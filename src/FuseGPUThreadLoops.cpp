@@ -339,10 +339,18 @@ class ExtractSharedAllocations : public IRMutator {
         user_assert(!op->new_expr.defined()) << "Allocate node inside GPU kernel has custom new expression.\n" <<
             "(Memoization is not supported inside GPU kernels at present.)\n";
 
-        if (in_threads || op->name == "prod") { // TODO: Remove this hack and replace with store_in
+        if (in_threads ||
+            op->memory_type == MemoryType::Stack ||
+            op->memory_type == MemoryType::Register) {
+            // TODO: Support shared allocations inside loops over threads by giving each loop iteration a unique slice.
             IRMutator::visit(op);
             return;
         }
+
+        user_assert(op->memory_type == MemoryType::Auto ||
+                    op->memory_type == MemoryType::GPUShared)
+            << "Allocation " << op->name << " must live in shared memory, "
+            << "but is scheduled to live in " << op->memory_type << " memory.\n";
 
         shared.emplace(op->name, IntInterval(barrier_stage, barrier_stage));
         IRMutator::visit(op);
@@ -536,7 +544,8 @@ public:
             // Individual shared allocations.
             for (SharedAllocation alloc : allocations) {
                 s = Allocate::make(shared_mem_name + "_" + alloc.name,
-                                   alloc.type, {alloc.size}, const_true(), s);
+                                   alloc.type, MemoryType::GPUShared,
+                                   {alloc.size}, const_true(), s);
             }
         } else {
             // One big combined shared allocation.
@@ -562,7 +571,8 @@ public:
 
             // Add a dummy allocation at the end to get the total size
             Expr total_size = Variable::make(Int(32), "group_" + std::to_string(mem_allocs.size()-1) + ".shared_offset");
-            s = Allocate::make(shared_mem_name, UInt(8), {total_size}, const_true(), s);
+            s = Allocate::make(shared_mem_name, UInt(8), MemoryType::GPUShared,
+                               {total_size}, const_true(), s);
 
             // Define an offset for each allocation. The offsets are in
             // elements, not bytes, so that the stores and loads can use
@@ -603,6 +613,7 @@ class ExtractWarpAllocations : public IRMutator {
         string loop_var; // The nearest enclosing loop over threads. Empty if it's at block level.
         Type type;
         Expr size;
+        MemoryType memory_type; // Should be Auto, Stack, or Register
     };
 
     bool in_lane_loop = false;
@@ -658,6 +669,13 @@ class ExtractWarpAllocations : public IRMutator {
             return;
         }
 
+        user_assert(op->memory_type == MemoryType::Stack ||
+                    op->memory_type == MemoryType::Register ||
+                    op->memory_type == MemoryType::Auto)
+            << "Allocation " << op->name << " is scheduled inside a loop over GPU threads, so "
+            << "it must live in stack memory or registers. "
+            << "Shared allocations at this loop level are not yet supported.\n";
+
         warp_allocations.push(op->name, 0);
         WarpAllocation alloc;
         alloc.name = op->name;
@@ -668,6 +686,7 @@ class ExtractWarpAllocations : public IRMutator {
             alloc.size *= op->extents[i];
         }
         alloc.size = simplify(alloc.size);
+        alloc.memory_type = op->memory_type;
 
         allocations.push_back(alloc);
         stmt = mutate(op->body);
@@ -712,7 +731,7 @@ public:
         for (WarpAllocation &alloc : allocations) {
             if ((!loop_var.empty() && ends_with(alloc.loop_var, loop_var)) |
                 (loop_var.empty() && alloc.loop_var.empty())) {
-                body = Allocate::make(alloc.name, alloc.type, {alloc.size}, const_true(), body);
+                body = Allocate::make(alloc.name, alloc.type, alloc.memory_type, {alloc.size}, const_true(), body);
             }
         }
         return body;

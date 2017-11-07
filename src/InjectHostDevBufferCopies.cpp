@@ -456,7 +456,7 @@ class InjectBufferCopies : public IRMutator {
 
                 // The allocate node is innermost
                 Expr host = Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
-                body = Allocate::make(buffer, type, extents, condition, body,
+                body = Allocate::make(buffer, type, MemoryType::Heap, extents, condition, body,
                                       host, "halide_device_host_nop_free");
 
                 // Then the destructor
@@ -578,7 +578,8 @@ class InjectBufferCopies : public IRMutator {
                 body = substitute(op->name, reinterpret(Handle(), make_zero(UInt(64))), body);
             }
 
-            stmt = Allocate::make(op->name, op->type, op->extents, condition, body, op->new_expr, op->free_function);
+            stmt = Allocate::make(op->name, op->type, op->memory_type, op->extents,
+                                  condition, body, op->new_expr, op->free_function);
         }
     }
 

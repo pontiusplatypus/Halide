@@ -49,7 +49,8 @@ public:
             .gpu_blocks(x, y)
             .gpu_threads(ty)
             .gpu_lanes(xii);
-        prod.compute_at(out, x)
+        prod.store_in(MemoryType::Register)
+            .compute_at(out, x)
             .split(x, xo, xi, warp_size * vec_size, TailStrategy::RoundUp)
             .split(y, ty, y, y_unroll)
             .gpu_threads(ty)

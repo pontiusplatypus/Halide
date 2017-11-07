@@ -391,7 +391,8 @@ private:
             new_expr.same_as(op->new_expr)) {
             stmt = op;
         } else {
-            stmt = Allocate::make(op->name, op->type, new_extents, condition, body, new_expr, op->free_function);
+            stmt = Allocate::make(op->name, op->type, op->memory_type,
+                                  new_extents, condition, body, new_expr, op->free_function);
         }
     }
 
@@ -433,7 +434,7 @@ private:
             condition.same_as(op->condition)) {
             stmt = op;
         } else {
-            stmt = Realize::make(op->name, op->types, new_bounds, condition, body);
+            stmt = Realize::make(op->name, op->types, op->memory_type, new_bounds, condition, body);
         }
     }
 

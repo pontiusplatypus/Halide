@@ -364,7 +364,8 @@ class LowerWarpShuffles : public IRMutator {
                 internal_assert(alloc && alloc->extents.size() == 1);
                 int new_size = allocation_info.get(alloc->name).size;
                 allocation_info.pop(alloc->name);
-                body = Allocate::make(alloc->name, alloc->type, {new_size}, alloc->condition,
+                body = Allocate::make(alloc->name, alloc->type, alloc->memory_type,
+                                      {new_size}, alloc->condition,
                                       body, alloc->new_expr, alloc->free_function);
             }
             allocations.clear();
@@ -381,7 +382,8 @@ class LowerWarpShuffles : public IRMutator {
             // Rewrap any hoisted allocations that weren't placed outside some inner loop
             for (Stmt s : allocations) {
                 const Allocate *alloc = s.as<Allocate>();
-                body = Allocate::make(alloc->name, alloc->type, alloc->extents, alloc->condition,
+                body = Allocate::make(alloc->name, alloc->type, alloc->memory_type,
+                                      alloc->extents, alloc->condition,
                                       body, alloc->new_expr, alloc->free_function);
             }
             allocations.clear();

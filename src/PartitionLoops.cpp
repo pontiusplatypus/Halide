@@ -811,7 +811,7 @@ class RenormalizeGPULoops : public IRMutator {
                 IRMutator::visit(op);
             } else {
                 Stmt inner = LetStmt::make(op->name, op->value, a->body);
-                inner = Allocate::make(a->name, a->type, a->extents, a->condition, inner);
+                inner = Allocate::make(a->name, a->type, a->memory_type, a->extents, a->condition, inner);
                 stmt = mutate(inner);
             }
         } else {
@@ -846,7 +846,9 @@ class RenormalizeGPULoops : public IRMutator {
         const LetStmt *let_b = else_case.as<LetStmt>();
         if (allocate_a && allocate_b) {
             Stmt inner = IfThenElse::make(op->condition, allocate_a->body, allocate_b->body);
-            inner = Allocate::make(allocate_a->name, allocate_a->type, allocate_a->extents, allocate_a->condition, inner);
+            inner = Allocate::make(allocate_a->name, allocate_a->type,
+                                   allocate_a->memory_type, allocate_a->extents,
+                                   allocate_a->condition, inner);
             stmt = mutate(inner);
         } else if (let_a && let_b && let_a->name == let_b->name) {
             string condition_name = unique_name('t');

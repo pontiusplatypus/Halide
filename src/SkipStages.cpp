@@ -378,7 +378,7 @@ private:
 
                 debug(3) << "Done guarding computation for " << op->name << "\n";
 
-                stmt = Realize::make(op->name, op->types, op->bounds,
+                stmt = Realize::make(op->name, op->types, op->memory_type, op->bounds,
                                      alloc_predicate, body);
             } else {
                 IRMutator::visit(op);

@@ -13,6 +13,7 @@
 #include "LLVM_Headers.h"
 #include "LLVM_Runtime_Linker.h"
 
+#include <fstream>
 
 // This is declared in NVPTX.h, which is not exported. Ugly, but seems better than
 // hardcoding a path to the .h file.
@@ -235,6 +236,46 @@ void CodeGen_PTX_Dev::visit(const AssertStmt *op) {
     codegen(IfThenElse::make(!op->condition, Evaluate::make(trap)));
 }
 
+void CodeGen_PTX_Dev::visit(const Load *op) {
+
+    // Do align 4-wide 32-bit loads as a single i128 load.
+    const Ramp *r = op->index.as<Ramp>();
+    // TODO: lanes >= 4, not lanes == 4
+    if (is_one(op->predicate) && r && is_one(r->stride) && r->lanes == 4 && op->type.bits() == 32) {
+        ModulusRemainder align = modulus_remainder(r->base, alignment_info);
+        if (align.modulus % 4 == 0 && align.remainder % 4 == 0) {
+            Expr index = simplify(r->base / 4);
+            Expr equiv = Load::make(UInt(128), op->name, index,
+                                    op->image, op->param, const_true());
+            equiv = reinterpret(op->type, equiv);
+            codegen(equiv);
+            return;
+        }
+    }
+
+    CodeGen_LLVM::visit(op);
+}
+
+void CodeGen_PTX_Dev::visit(const Store *op) {
+
+    // Do align 4-wide 32-bit loads as a single i128 load.
+
+    const Ramp *r = op->index.as<Ramp>();
+    // TODO: lanes >= 4, not lanes == 4
+    if (is_one(op->predicate) && r && is_one(r->stride) && r->lanes == 4 && op->value.type().bits() == 32) {
+        ModulusRemainder align = modulus_remainder(r->base, alignment_info);
+        if (align.modulus % 4 == 0 && align.remainder % 4 == 0) {
+            Expr index = simplify(r->base / 4);
+            Expr value = reinterpret(UInt(128), op->value);
+            Stmt equiv = Store::make(op->name, value, index, op->param, const_true());
+            codegen(equiv);
+            return;
+        }
+    }
+
+    CodeGen_LLVM::visit(op);
+}
+
 string CodeGen_PTX_Dev::march() const {
     return "nvptx64";
 }
@@ -411,7 +452,31 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
     debug(2) << "Done with CodeGen_PTX_Dev::compile_to_src";
 
     debug(1) << "PTX kernel:\n" << outstr.c_str() << "\n";
+
     vector<char> buffer(outstr.begin(), outstr.end());
+
+    // Dump the SASS too if the cuda SDK is in the path
+    if (debug::debug_level() >= 1) {
+        debug(2) << "Compiling PTX to SASS. Will fail if CUDA SDK is not installed (and in the path).\n";
+
+        TemporaryFile ptx(get_current_kernel_name(), ".ptx");
+        TemporaryFile sass(get_current_kernel_name(), ".sass");
+
+        std::ofstream f(ptx.pathname());
+        f.write(buffer.data(), buffer.size());
+        f.close();
+
+        string cmd = "ptxas --gpu-name " + mcpu() + " " + ptx.pathname() + " -o " + sass.pathname();
+        system(cmd.c_str());
+        cmd = "nvdisasm " + sass.pathname();
+        system(cmd.c_str());
+
+        // Note: It works to embed the contents of the .sass file in
+        // the buffer instead of the ptx source, and this could help
+        // with app startup times. Expose via the target?
+    }
+
+    // Null-terminate the ptx source
     buffer.push_back(0);
     return buffer;
 #else // WITH_PTX

@@ -60,8 +60,7 @@ bool is_var_relop_simple_const(const Expr &e, string* name) {
                 *name = v->name;
                 return true;
             }
-        }
-        else if (is_simple_const(r->a)) {
+        } else if (is_simple_const(r->a)) {
             const Variable *v = r->b.template as<Variable>();
             if (v) {
                 *name = v->name;
@@ -1481,6 +1480,22 @@ private:
                    equal(div_b_a->a, a)) {
             // x - (x/4)*4 -> x%4
             expr = mutate(a % mul_b->b);
+        } else if (mul_a &&
+                   mul_b &&
+                   const_int(mul_a->b, &ia) &&
+                   const_int(mul_b->b, &ib) &&
+                   ib % ia == 0) {
+            // x * a - y * (a * b) -> (x - y * b) * a
+            Expr ratio = make_const(a.type(), div_imp(ib, ia));
+            expr = mutate((mul_a->a - mul_b->a * ratio) * mul_a->b);
+        } else if (mul_a &&
+                   mul_b &&
+                   const_int(mul_a->b, &ia) &&
+                   const_int(mul_b->b, &ib) &&
+                   ia % ib == 0) {
+            // x * (a * b) - y * a -> (x * b - y) * a
+            Expr ratio = make_const(a.type(), div_imp(ia, ib));
+            expr = mutate((mul_a->a * ratio - mul_b->a) * mul_b->b);
         } else if (div_a &&
                    div_b &&
                    is_positive_const(div_a->b) &&
@@ -2272,6 +2287,15 @@ private:
                    (ia % ib == 0)) {
             // (x * (b*a)) % b -> 0
             expr = make_zero(op->type);
+        } else if (no_overflow(op->type) &&
+                   mul_a &&
+                   const_int(b, &ib) &&
+                   ib &&
+                   const_int(mul_a->b, &ia) &&
+                   (ib % ia == 0)) {
+            // (x * a) % (a * b) -> (x % b) * a
+            Expr ratio = make_const(a.type(), div_imp(ib, ia));
+            expr = mutate((mul_a->a % ratio) * mul_a->b);
         } else if (no_overflow(op->type) &&
                    add_a &&
                    mul_a_a &&
@@ -5570,6 +5594,11 @@ void check_algebra() {
     check(xf - yf*-2.0f, xf + y*2.0f);
     check(xf + yf*-2.0f, xf - y*2.0f);
     check(xf*-2.0f + yf, yf - x*2.0f);
+
+    check((x * 8) - (y * 4), (x * 2 - y) * 4);
+    check((x * 4) - (y * 8), (x - y * 2) * 4);
+
+    check((x * 2) % 6, (x % 3) * 2);
 
     check(x - (x/8)*8, x % 8);
     check((x/8)*8 - x, -(x % 8));

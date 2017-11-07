@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     }
 
     // Check correctness using small-integer matrices
-    {
+    if (1) {
         Buffer<float> A(size, size), B(size, size), C(size, size);
         A.for_each_value([](float &v) {v = (rand() & 3) - 1;});
         B.for_each_value([](float &v) {v = (rand() & 3) - 1;});
@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
     // Benchmark it
     {
         Buffer<float> A(size, size), B(size, size), C(size, size);
-        double t = Halide::Tools::benchmark(5, 5, [&]() {
+        double t = Halide::Tools::benchmark(3, 3, [&]() {
                 mat_mul(A, B, C);
                 C.device_sync();
             });
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
         cublasHandle_t handle;
         cublasCreate(&handle);
         float alpha = 1.0f, beta = 1.0f;
-        double t = Halide::Tools::benchmark(5, 5, [&]() {
+        double t = Halide::Tools::benchmark(3, 3, [&]() {
                 cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                         size, size, size, &alpha, A, size, B, size, &beta, C, size);
                 cudaDeviceSynchronize();

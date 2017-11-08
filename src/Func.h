@@ -1534,7 +1534,7 @@ public:
     // @}
 
     /** The given dimension corresponds to the lanes in a GPU
-     * warp. GPU warps lanes are distinguished from GPU threads by the
+     * warp. GPU warp lanes are distinguished from GPU threads by the
      * fact that all warp lanes run together in lockstep, which
      * permits lightweight communication of data from one lane to
      * another. */

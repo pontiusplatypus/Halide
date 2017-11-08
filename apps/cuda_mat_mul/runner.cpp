@@ -10,7 +10,7 @@ using Halide::Tools::benchmark;
 int main(int argc, char **argv) {
     int size = 1024;
     if (argc > 1) {
-        //size = atoi(argv[1]);
+        size = atoi(argv[1]);
     }
 
     // Check correctness using small-integer matrices

@@ -476,7 +476,7 @@ DependenceAnalysis::regions_required(Function f, int stage_num,
                             // correct dimension and update the region map.
                             Buffer<> buf;
                             if (arg.is_image_param()) {
-                                buf = arg.image_param.get_buffer();
+                                buf = arg.image_param.buffer();
                             } else {
                                 buf = arg.buffer;
                             }
@@ -3068,7 +3068,7 @@ Partitioner::analyze_spatial_locality(const FStage &stg,
 // The current auto scheduler cannots handle such cases.
 void validate_no_partial_schedules(const Function &f) {
     // Verify no compute_root or bounds are specified
-    user_assert(f.schedule().compute_level().is_inline())
+    user_assert(f.schedule().compute_level().is_inlined())
         << "AutoSchedule: cannot auto-schedule function \"" << f.name()
         << "\" since it is scheduled to be computed at root\n";
     user_assert(f.schedule().bounds().empty())
@@ -3339,6 +3339,11 @@ string generate_schedules(const vector<Function> &outputs, const Target &target,
     debug(2) << "Computing full realization order...\n";
     vector<string> full_order = realization_order(outputs, env);
 
+    // Finalize all the LoopLevels
+    for (auto &iter : env) {
+        iter.second.lock_loop_levels();
+    }
+
     // Validate that none of the functions in the pipeline have partial schedules.
     debug(2) << "Validating no partial schedules...\n";
     for (const auto &iter : env) {
@@ -3499,6 +3504,10 @@ string generate_schedules(const vector<Function> &outputs, const Target &target,
     return sched_string;
 }
 
+}
+
+MachineParams MachineParams::generic() {
+  return MachineParams(16, 16 * 1024 * 1024, 40);
 }
 
 std::string MachineParams::to_string() const {

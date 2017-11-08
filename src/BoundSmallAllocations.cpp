@@ -49,7 +49,7 @@ class BoundSmallAllocations : public IRMutator {
 
     void visit(const Allocate *op) {
         Expr total_extent = make_const(Int(64), 1);
-        for (Expr e : op->extents) {
+        for (const Expr &e : op->extents) {
             total_extent *= e;
         }
         Expr bound = find_constant_bound(total_extent, Direction::Upper, scope);
@@ -62,7 +62,7 @@ class BoundSmallAllocations : public IRMutator {
             << "Only fixed-size allocations are supported on the gpu. "
             << "Try storing into shared memory instead.";
         // 128 bytes is a typical minimum allocation size in
-        // halide_malloc. For now we be very conservative, and only
+        // halide_malloc. For now we are very conservative, and only
         // round sizes up to a constant if they're smaller than that.
         Expr malloc_overhead = 128 / op->type.bytes();
         if (bound.defined() &&
@@ -81,7 +81,7 @@ class BoundSmallAllocations : public IRMutator {
     }
 };
 
-Stmt bound_small_allocations(Stmt s) {
+Stmt bound_small_allocations(const Stmt &s) {
     return BoundSmallAllocations().mutate(s);
 }
 

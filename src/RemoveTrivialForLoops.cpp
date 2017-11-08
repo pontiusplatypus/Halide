@@ -8,10 +8,11 @@
 namespace Halide {
 namespace Internal {
 
-class RemoveTrivialForLoops : public IRMutator {
-    using IRMutator::visit;
+class RemoveTrivialForLoops : public IRMutator2 {
+    using IRMutator2::visit;
 
-    void visit(const For *for_loop) {
+    Stmt visit(const For *for_loop) override {
+
         Stmt body = mutate(for_loop->body);
 
         if (is_one(for_loop->extent) &&
@@ -19,7 +20,7 @@ class RemoveTrivialForLoops : public IRMutator {
             // Don't assume any device API loops are trivial, but we
             // can substitute in the min value if the loop is size 1.
             body = substitute(for_loop->name, for_loop->min, body);
-            stmt = For::make(for_loop->name, for_loop->min, for_loop->extent,
+            return For::make(for_loop->name, for_loop->min, for_loop->extent,
                              for_loop->for_type, for_loop->device_api, body);
         } else if (is_one(for_loop->extent)) {
             if (for_loop->for_type == ForType::Parallel) {
@@ -31,17 +32,17 @@ class RemoveTrivialForLoops : public IRMutator {
                           << for_loop->name << " has extent one. "
                           << "Not vectorizing.\n";
             }
-            stmt = LetStmt::make(for_loop->name, for_loop->min, body);
+            return LetStmt::make(for_loop->name, for_loop->min, body);
         } else if (is_zero(for_loop->extent)) {
-            stmt = Evaluate::make(0);
+            return Evaluate::make(0);
         } else if (can_prove(for_loop->extent <= 1)) {
             // Loop has at most one iteration
-            stmt = LetStmt::make(for_loop->name, for_loop->min, body);
-            stmt = IfThenElse::make(for_loop->extent > 0, stmt, Stmt());
+            Stmt stmt = LetStmt::make(for_loop->name, for_loop->min, body);
+            return IfThenElse::make(for_loop->extent > 0, stmt, Stmt());
         } else if (body.same_as(for_loop->body)) {
-            stmt = for_loop;
+            return for_loop;
         } else {
-            stmt = For::make(for_loop->name, for_loop->min, for_loop->extent,
+            return For::make(for_loop->name, for_loop->min, for_loop->extent,
                              for_loop->for_type, for_loop->device_api, body);
         }
     }

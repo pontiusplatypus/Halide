@@ -4424,11 +4424,17 @@ private:
                 return;
             }
 
-            int64_t ib = 0;
-            uint64_t ub = 0;
+            int64_t ia, ib = 0;
+            uint64_t ua, ub = 0;
             int bits;
 
-            if (const_int(b, &ib) &&
+            if (const_int(a, &ia) &&
+                const_int(b, &ib)) {
+                expr = make_const(op->type, ia & ib);
+            } else if (const_uint(a, &ua) &&
+                       const_uint(b, &ub)) {
+                expr = make_const(op->type, ua & ub) ;
+            } else if (const_int(b, &ib) &&
                 !b.type().is_max(ib) &&
                 is_const_power_of_two_integer(make_const(a.type(), ib + 1), &bits)) {
                 expr = Mod::make(a, make_const(a.type(), ib + 1));
@@ -4448,10 +4454,55 @@ private:
             if (propagate_indeterminate_expression(a, b, op->type, &expr)) {
                 return;
             }
-            if (a.same_as(op->args[0]) && b.same_as(op->args[1])) {
+            int64_t ia, ib;
+            uint64_t ua, ub;
+            if (const_int(a, &ia) &&
+                const_int(b, &ib)) {
+                expr = make_const(op->type, ia | ib);
+            } else if (const_uint(a, &ua) &&
+                       const_uint(b, &ub)) {
+                expr = make_const(op->type, ua | ub);
+            } else if (a.same_as(op->args[0]) && b.same_as(op->args[1])) {
                 expr = op;
             } else {
                 expr = a | b;
+            }
+        } else if (op->is_intrinsic(Call::bitwise_not)) {
+            Expr a = mutate(op->args[0]);
+            if (propagate_indeterminate_expression(a, op->type, &expr)) {
+                return;
+            }
+            int64_t ia;
+            uint64_t ua;
+            if (const_int(a, &ia)) {
+                expr = make_const(op->type, ~ia);
+            } else if (const_uint(a, &ua)) {
+                expr = make_const(op->type, ~ua);
+            } else if (a.same_as(op->args[0])) {
+                expr = op;
+            } else {
+                expr = ~a;
+            }
+        } else if (op->is_intrinsic(Call::reinterpret)) {
+            Expr a = mutate(op->args[0]);
+            if (propagate_indeterminate_expression(a, op->type, &expr)) {
+                return;
+            }
+            int64_t ia;
+            uint64_t ua;
+            bool vector = op->type.is_vector() || a.type().is_vector();
+            if (op->type == a.type()) {
+                expr = a;
+            } else if (const_int(a, &ia) && op->type.is_uint() && !vector) {
+                // int -> uint
+                expr = make_const(op->type, (uint64_t)ia);
+            } else if (const_uint(a, &ua) && op->type.is_int() && !vector) {
+                // uint -> int
+                expr = make_const(op->type, (int64_t)ua);
+            } else if (a.same_as(op->args[0])) {
+                expr = op;
+            } else {
+                expr = reinterpret(op->type, a);
             }
         } else if (op->is_intrinsic(Call::abs)) {
             // Constant evaluate abs(x).
@@ -6756,6 +6807,10 @@ void simplify_test() {
     // TODO: more coverage of bitwise_and and bitwise_or.
     check(cast(UInt(32), x) & Expr((uint32_t)0xaaaaaaaa),
           cast(UInt(32), x) & Expr((uint32_t)0xaaaaaaaa));
+
+    // Check constant-folding of bitwise ops (and indirectly, reinterpret)
+    check(Let::make(x.as<Variable>()->name, 5, ((~x) & 3) | 16), (~5 & 3) | 16);
+    check(Let::make(x.as<Variable>()->name, 5, ((~cast<uint8_t>(x)) & 3) | 16), make_const(UInt(8), (~5 & 3) | 16));
 
     // Check that chains of widening casts don't lose the distinction
     // between zero-extending and sign-extending.

@@ -43,7 +43,10 @@ class InjectThreadBarriers : public IRMutator {
 
         if (op->for_type == ForType::Serial) {
             Stmt body = mutate(op->body);
-            if (!body.same_as(op->body)) {
+            // Serial for loops at the block level with internal
+            // synchronization also need synchronization after each
+            // loop iteration.
+            if (!in_threads && !body.same_as(op->body)) {
                 body = Block::make(body, barrier);
             }
             stmt = For::make(op->name, op->min, op->extent,

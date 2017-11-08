@@ -605,10 +605,10 @@ public:
 // Pull out any allocate node outside of the innermost thread
 // block. Should only be run after shared allocations have already
 // been extracted.
-class ExtractWarpAllocations : public IRMutator {
+class ExtractRegisterAllocations : public IRMutator {
     using IRMutator::visit;
 
-    struct WarpAllocation {
+    struct RegisterAllocation {
         string name;
         string loop_var; // The nearest enclosing loop over threads. Empty if it's at block level.
         Type type;
@@ -633,19 +633,19 @@ class ExtractWarpAllocations : public IRMutator {
             }
 
             // Set aside the allocations we've found so far.
-            vector<WarpAllocation> old;
+            vector<RegisterAllocation> old;
             old.swap(allocations);
 
             // Find allocations inside the loop body
             Stmt body = mutate(op->body);
 
-            // Expand any new warp allocations found in the body using the loop bounds.
+            // Expand any new register allocations found in the body using the loop bounds.
             Scope<Interval> scope;
             scope.push(op->name, Interval(Variable::make(Int(32), op->name + ".loop_min"),
                                           Variable::make(Int(32), op->name + ".loop_max")));
 
             // Expand the inner allocations using the loop bounds.
-            for (WarpAllocation &s : allocations) {
+            for (RegisterAllocation &s : allocations) {
                 if (expr_uses_var(s.size, op->name)) {
                     s.size = bounds_of_expr_in_scope(s.size, scope).max;
                 }
@@ -676,8 +676,8 @@ class ExtractWarpAllocations : public IRMutator {
             << "it must live in stack memory or registers. "
             << "Shared allocations at this loop level are not yet supported.\n";
 
-        warp_allocations.push(op->name, 0);
-        WarpAllocation alloc;
+        register_allocations.push(op->name, 0);
+        RegisterAllocation alloc;
         alloc.name = op->name;
         alloc.type = op->type;
         alloc.size = 1;
@@ -690,7 +690,7 @@ class ExtractWarpAllocations : public IRMutator {
 
         allocations.push_back(alloc);
         stmt = mutate(op->body);
-        warp_allocations.pop(op->name);
+        register_allocations.pop(op->name);
     }
 
     template<typename ExprOrStmt, typename LetOrLetStmt>
@@ -699,7 +699,7 @@ class ExtractWarpAllocations : public IRMutator {
 
         body = mutate(op->body);
 
-        for (WarpAllocation &s : allocations) {
+        for (RegisterAllocation &s : allocations) {
             if (expr_uses_var(s.size, op->name)) {
                 s.size = simplify(Let::make(op->name, op->value, s.size));
             }
@@ -721,14 +721,14 @@ class ExtractWarpAllocations : public IRMutator {
     }
 
 
-    Scope<int> warp_allocations;
+    Scope<int> register_allocations;
     string loop_var;
 
 public:
-    vector<WarpAllocation> allocations;
+    vector<RegisterAllocation> allocations;
 
     Stmt rewrap(Stmt body, const string &loop_var) {
-        for (WarpAllocation &alloc : allocations) {
+        for (RegisterAllocation &alloc : allocations) {
             if ((!loop_var.empty() && ends_with(alloc.loop_var, loop_var)) |
                 (loop_var.empty() && alloc.loop_var.empty())) {
                 body = Allocate::make(alloc.name, alloc.type, alloc.memory_type, {alloc.size}, const_true(), body);
@@ -756,16 +756,16 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
             debug(3) << "Normalized dimensionality:\n" << body << "\n\n";
 
             Expr block_size_x = block_size.dimensions() ? block_size.extent(0) : 1;
-            ExtractWarpAllocations warp_allocs;
+            ExtractRegisterAllocations register_allocs;
             ForType innermost_loop_type = ForType::GPUThread;
             if (block_size.dimensions()) {
-                body = warp_allocs.mutate(body);
-                if (!warp_allocs.allocations.empty()) {
+                body = register_allocs.mutate(body);
+                if (!register_allocs.allocations.empty()) {
                     innermost_loop_type = ForType::GPULane;
                 }
             }
 
-            debug(3) << "Extracted warp-level allocations:\n" << body << "\n\n";
+            debug(3) << "Extracted register-level allocations:\n" << body << "\n\n";
 
             InjectThreadBarriers i;
             body = i.mutate(body);
@@ -779,18 +779,18 @@ class FuseGPUThreadLoopsSingleKernel : public IRMutator {
 
             // There is always a loop over thread_id_x
             string thread_id = "." + thread_names[0];
-            // Add back in any warp-level allocations
-            body = warp_allocs.rewrap(body, thread_id);
+            // Add back in any register-level allocations
+            body = register_allocs.rewrap(body, thread_id);
             body = For::make(thread_id, 0, block_size_x, innermost_loop_type, op->device_api, body);
 
             // Rewrap the whole thing in other loops over threads
             for (int i = 1; i < block_size.dimensions(); i++) {
                 thread_id = "." + thread_names[i];
-                body = warp_allocs.rewrap(body, thread_id);
+                body = register_allocs.rewrap(body, thread_id);
                 body = For::make("." + thread_names[i], 0, block_size.extent(i), ForType::GPUThread, op->device_api, body);
             }
             thread_id.clear();
-            body = warp_allocs.rewrap(body, thread_id);
+            body = register_allocs.rewrap(body, thread_id);
 
             debug(3) << "Rewrapped in for loops:\n" << body << "\n\n";
 

@@ -264,7 +264,7 @@ int main(int argc, char **argv) {
 
     {
         // Box-downsample by a factor of 8 using summation within each
-        // warp. Does a general any->any permutation.
+        // warp.
         Func f;
         Var x, y;
         f(x, y) = cast<float>(x + y);
@@ -285,10 +285,103 @@ int main(int argc, char **argv) {
         s1.compute_at(s4, yi).split(x, x, xi, 32, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
         f.in().compute_at(s4, yi).split(x, x, xi, 64, TailStrategy::RoundUp).vectorize(xi, 2).gpu_lanes(xi).unroll(x);
 
-        s4.realize(64, 64);
+        Buffer<float> out = s4.realize(64, 64);
+
+        for (int y = 0; y < out.height(); y++) {
+            for (int x = 0; x < out.width(); x++) {
+                float actual = out(x, y);
+                // One factor of 8 from adding instead of averaging,
+                // and another factor of 8 from the compression of the
+                // coordinate system across x.
+                float correct = (x*8 + y)*8 + 28;
+                if (correct != actual) {
+                    printf("out(%d, %d) = %f instead of %f\n",
+                           x, y, actual, correct);
+                    return -1;
+                }
+            }
+        }
     }
 
-    // TODO add custom lowering pass that verifies no shared usage
+    {
+        // The same, with a narrower tile in x so that one warp is divided up across many scanlines.
+        Func f;
+        Var x, y;
+        f(x, y) = cast<float>(x + y);
+        f.compute_root();
+
+        Func s1, s2, s3, s4;
+
+        s1(x, y) = f(2*x, y) + f(2*x + 1, y);
+        s2(x, y) = s1(2*x, y) + s1(2*x + 1, y);
+        s3(x, y) = s2(2*x, y) + s2(2*x + 1, y);
+        s4(x, y) = s3(x, y);
+
+        Var xi, yi;
+        s4.gpu_tile(x, y, xi, yi, 8, 16, TailStrategy::RoundUp).vectorize(xi, 2).gpu_lanes(xi);
+        s3.in(s4).compute_at(s4, xi).unroll(x);
+        s3.compute_at(s4, yi).split(x, x, xi, 4, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        s2.compute_at(s4, yi).split(x, x, xi, 4, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        s1.compute_at(s4, yi).split(x, x, xi, 4, TailStrategy::RoundUp).gpu_lanes(xi).unroll(x);
+        f.in().compute_at(s4, yi).split(x, x, xi, 8, TailStrategy::RoundUp).vectorize(xi, 2).gpu_lanes(xi).unroll(x);
+
+        Buffer<float> out = s4.realize(32, 32);
+
+        for (int y = 0; y < out.height(); y++) {
+            for (int x = 0; x < out.width(); x++) {
+                float actual = out(x, y);
+                float correct = (x*8 + y)*8 + 28;
+                if (correct != actual) {
+                    printf("out(%d, %d) = %f instead of %f\n",
+                           x, y, actual, correct);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    {
+        Buffer<uint8_t> buf(256, 256);
+        buf.for_each_value([](uint8_t &x) {
+                x = rand();
+            });
+        buf.set_host_dirty();
+
+        // Store a small LUT in-register, populated at the warp
+        // level.
+        Func lut;
+        Var x, y;
+        lut(x) = cast<uint16_t>(x)+1;
+
+        Func curved;
+        curved(x, y) = lut(buf(x, y));
+
+        Var xi, yi, xo;
+        curved.compute_root().tile(x, y, xi, yi, 32, 32)
+            .gpu_blocks(x, y).gpu_threads(yi).gpu_lanes(xi);
+
+        lut.compute_root();
+
+        // Load the LUT into shared at the start of each block using warp 0.
+        lut.in().compute_at(curved, x).split(x, xo, xi, 32 * 4).vectorize(xi, 4).gpu_lanes(xi).unroll(xo);
+
+        // Load it from shared into registers for each warp.
+        lut.in().in().compute_at(curved, yi).split(x, xo, xi, 32 * 4).vectorize(xi, 4).gpu_lanes(xi).unroll(xo);
+
+        Buffer<uint16_t> out = curved.realize(buf.width(), buf.height());
+
+        for (int y = 0; y < out.height(); y++) {
+            for (int x = 0; x < out.width(); x++) {
+                uint16_t actual = out(x, y);
+                uint16_t correct = ((uint16_t)buf(x, y)) + 1;
+                if (correct != actual) {
+                    printf("out(%d, %d) = %d instead of %d\n",
+                           x, y, actual, correct);
+                    return -1;
+                }
+            }
+        }
+    }
 
     printf("Success!\n");
     return 0;

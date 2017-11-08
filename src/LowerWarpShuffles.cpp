@@ -305,8 +305,6 @@ class LowerWarpShuffles : public IRMutator {
             (op->for_type == ForType::GPULane ||
              (op->for_type == ForType::GPUThread && !allocations.empty()))) {
 
-            debug(0) << "Lowering warp shuffles in loop over " << op->name << ": " << allocations.size() << "\n";
-
             bool should_mask = false;
             Expr old_warp_size = warp_size;
             if (op->for_type == ForType::GPULane) {
@@ -369,8 +367,6 @@ class LowerWarpShuffles : public IRMutator {
                                       body, alloc->new_expr, alloc->free_function);
             }
             allocations.clear();
-
-            debug(0) << "Stmt after lowering warp shuffles in loop over: " << op->name << "\n" << body << "\n\n";
 
             this_lane = Expr();
             this_lane_name.clear();
@@ -449,7 +445,6 @@ class LowerWarpShuffles : public IRMutator {
         if (expr_uses_var(idx, this_lane_name)) {
             Expr equiv = make_warp_load(type, name, make_zero(idx.type()), lane);
             int elems = allocation_info.get(name).size;
-            debug(0) << "Making a monstrosity: " << elems << ": " << idx << "\n";
             for (int i = 1; i < elems; i++) {
                 // Load the right lanes from stripe number i
                 equiv = select(idx >= i, make_warp_load(type, name, make_const(idx.type(), i), lane), equiv);
@@ -460,6 +455,18 @@ class LowerWarpShuffles : public IRMutator {
         // Load the value to be shuffled
         Expr base_val = Load::make(type, name, idx, Buffer<>(),
                                    Parameter(), const_true(idx.type().lanes()));
+
+        // Make 32-bit with a combination of reinterprets and zero extension
+        Type shuffle_type = type;
+        if (type.bits() < 32) {
+            shuffle_type = UInt(32, type.lanes());
+            base_val = cast(shuffle_type, reinterpret(type.with_code(Type::UInt), base_val));
+        } else if (type.bits() == 64) {
+            // TODO: separate shuffles of the low and high halves and then recombine.
+            user_error << "Warp shuffles of 64-bit types not yet implemented\n";
+        } else {
+            user_assert(type.bits() == 32) << "Warp shuffles not supported for this type: " << type << "\n";
+        }
 
         Expr scalar_lane = lane;
         if (const Broadcast *b = scalar_lane.as<Broadcast>()) {
@@ -473,13 +480,10 @@ class LowerWarpShuffles : public IRMutator {
         internal_assert(may_use_warp_shuffle) << name << ", " << idx << ", " << lane << "\n";
 
         string intrin_suffix;
-        if (type == Float(32)) {
+        if (shuffle_type.is_float()) {
             intrin_suffix = ".f32";
-        } else if (type == Int(32) || type == UInt(32)) {
-            intrin_suffix = ".i32";
         } else {
-            // TODO: bools, vectors
-            user_error << "Warp shuffles only supported for scalar (u)int32_t and float\n";
+            intrin_suffix = ".i32";
         }
 
         Expr wild = Variable::make(Int(32), "*");
@@ -490,12 +494,14 @@ class LowerWarpShuffles : public IRMutator {
         // reduce the number of cases to check below.
         lane = solve_expression(lane, this_lane_name).result;
 
+        Expr shuffled;
+
         if (expr_match(this_lane + wild, lane, result)) {
             // We know that 0 <= lane + wild < warp_size by how we
             // constructed it, so we can just do a shuffle down.
-            Expr down = Call::make(type, "llvm.nvvm.shfl.down" + intrin_suffix,
+            Expr down = Call::make(shuffle_type, "llvm.nvvm.shfl.down" + intrin_suffix,
                                    {base_val, result[0], 31}, Call::PureExtern);
-            return down;
+            shuffled = down;
         } else if (expr_match((this_lane + wild) % wild, lane, result) &&
             is_const_power_of_two_integer(result[1], &bits) &&
             bits <= 5) {
@@ -504,23 +510,27 @@ class LowerWarpShuffles : public IRMutator {
             // intermediate registers than using a general gather for
             // this.
             Expr mask = (1 << bits) - 1;
-            Expr down = Call::make(type, "llvm.nvvm.shfl.down" + intrin_suffix,
+            Expr down = Call::make(shuffle_type, "llvm.nvvm.shfl.down" + intrin_suffix,
                                    {base_val, result[0], (1 << bits) - 1}, Call::PureExtern);
-            Expr up = Call::make(type, "llvm.nvvm.shfl.up" + intrin_suffix,
+            Expr up = Call::make(shuffle_type, "llvm.nvvm.shfl.up" + intrin_suffix,
                                  {base_val, (1 << bits) - result[0], 0, mask}, Call::PureExtern);
             Expr cond = (this_lane >= (1 << bits) - result[0]);
             Expr equiv = select(cond, up, down);
-            return simplify(equiv, true, bounds);
+            shuffled = simplify(equiv, true, bounds);
         } else {
-            Expr mask = warp_size - 1;
+            Expr mask = simplify(((31 & ~(warp_size - 1)) << 8) | 31);
             // The idx variant can do a general gather. Use it for all other cases.
-            return Call::make(type, "llvm.nvvm.shfl.idx" + intrin_suffix,
-                              {base_val, lane, mask}, Call::PureExtern);
+            shuffled = Call::make(shuffle_type, "llvm.nvvm.shfl.idx" + intrin_suffix,
+                                {base_val, lane, mask}, Call::PureExtern);
         }
         // TODO: butterfly, clamp don't need to use the general gather
 
-        internal_error << "Unsupported access pattern for warp shuffle: " << lane << "\n";
-        return Expr();
+        if (shuffled.type() != type) {
+            user_assert(shuffled.type().bits() > type.bits());
+            // Narrow it back down
+            shuffled = reinterpret(type, cast(type.with_code(Type::UInt), shuffled));
+        }
+        return shuffled;
     }
 
     void visit(const Load *op) {
@@ -533,7 +543,6 @@ class LowerWarpShuffles : public IRMutator {
             idx = simplify((idx / (warp_size * stride)) * stride + reduce_expr(idx, stride, bounds), true, bounds);
             // We don't want the idx to depend on the lane var
             idx = simplify(solve_expression(idx, this_lane_name).result, true, bounds);
-            debug(0) << "Making warp load: " << idx << ", " << lane << "\n";
             expr = make_warp_load(op->type, op->name, idx, lane);
         } else {
             IRMutator::visit(op);
@@ -646,11 +655,8 @@ class LowerWarpShufflesInEachKernel : public IRMutator {
     void visit(const For *op) {
         if (op->device_api == DeviceAPI::CUDA) {
             Stmt s = op;
-            debug(0) << "BEFORE:\n" << s << "\n\n";
             s = LowerWarpShuffles().mutate(s);
-            debug(0) << "HOIST:\n" << s << "\n\n";
             s = HoistWarpShuffles().mutate(s);
-            debug(0) << "AFTER:\n" << s << "\n\n";
             stmt = simplify(s);
         } else {
             IRMutator::visit(op);

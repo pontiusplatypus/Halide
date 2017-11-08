@@ -456,7 +456,7 @@ vector<char> CodeGen_PTX_Dev::compile_to_src() {
     vector<char> buffer(outstr.begin(), outstr.end());
 
     // Dump the SASS too if the cuda SDK is in the path
-    if (debug::debug_level() >= 1) {
+    if (debug::debug_level() >= 2) {
         debug(2) << "Compiling PTX to SASS. Will fail if CUDA SDK is not installed (and in the path).\n";
 
         TemporaryFile ptx(get_current_kernel_name(), ".ptx");

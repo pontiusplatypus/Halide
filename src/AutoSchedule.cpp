@@ -2302,6 +2302,28 @@ Partitioner::GroupAnalysis Partitioner::analyze_group(const Group &g, bool show_
     Cost out_cost = costs.stage_region_cost(g.output.func.name(),
                                             g.output.stage_num,
                                             tile_bounds, g.inlined);
+
+    debug(0) << "\n\nANALYZE GROUP:\n" << g << "\n";
+
+    debug(0) << "alloc reg:\n";
+    for (const auto &iter : alloc_regions) {
+        debug(0) << "\t" << iter.first << " -> " << iter.second << "\n";
+    }
+    debug(0) << "\n";
+
+    debug(0) << "compute reg:\n";
+    for (const auto &iter : compute_regions) {
+        debug(0) << "\t" << iter.first << " -> " << iter.second << "\n";
+    }
+    debug(0) << "\n";
+
+    debug(0) << "Out cost tile bound:\n";
+    for (const auto &iter : tile_bounds) {
+        debug(0) << "\t" << iter.first << " -> min: " << iter.second.min << ", max: " << iter.second.max << "\n";
+    }
+    debug(0) << "\n";
+    debug(0) << "Out cost: " << out_cost << "\n";
+
     if (!out_cost.defined()) {
         return GroupAnalysis();
     }

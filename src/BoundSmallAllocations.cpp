@@ -54,8 +54,8 @@ class BoundSmallAllocations : public IRMutator {
         }
         Expr bound = find_constant_bound(total_extent, Direction::Upper, scope);
         user_assert(bound.defined() ||
-                    (op->memory_type != MemoryType::Stack
-                     op->memory_type != MemoryType::Register));
+                    (op->memory_type != MemoryType::Stack &&
+                     op->memory_type != MemoryType::Register))
             << "Allocation " << op->name << " has a dynamic size. "
             << "Only fixed-size allocations can be stored on the stack or in registers. "
             << "Try storing on the heap instead.";
